@@ -8,12 +8,17 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
       ['Backspace', 'Apagar nota'],
       ['N', 'Nome de nota (A-G)'],
       ['Espaço', 'Play / pausa'],
+      ['Arrastar', 'Marcar trecho p/ loop (na partitura)'],
+      ['Arrastar (grade)', 'Selecionar trecho: BPM, tocar, copiar, apagar, mover'],
+      ['Ctrl+C / V', 'Copiar / colar o trecho selecionado no cursor'],
     ],
   },
   {
     title: 'Técnicas',
     items: [
-      ['/ \\', 'Slide'],
+      ['S', 'Slide (liga com a próxima nota)'],
+      ['/', 'Slide de saída p/ cima (2x rápido = p/ baixo)'],
+      ['\\', 'Slide de saída p/ baixo'],
       ['I', 'Slide sem casa def. (repita p/ direção)'],
       ['H', 'Hammer-on'],
       ['P', 'Pull-off'],

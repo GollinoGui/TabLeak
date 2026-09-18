@@ -1,11 +1,31 @@
 import * as React from 'react'
+import type { model } from '@coderline/alphatab'
 import { AlphaTabApi, LayoutMode, NotationElement, ScrollMode } from '@coderline/alphatab'
+
+type Beat = model.Beat
 
 interface Rect {
   x: number
   y: number
   w: number
   h: number
+}
+
+export interface PlaybackPosition {
+  currentTime: number
+  endTime: number
+  currentTick: number
+  endTick: number
+}
+
+export interface ActiveBeat {
+  barIndex: number
+  beatIndex: number
+}
+
+export interface SelectionRange {
+  startTick: number
+  endTick: number
 }
 
 /** Scrolls `container` the minimum amount needed to bring `rect` (in the
@@ -47,6 +67,10 @@ export function useAlphaTab(
   const [isPlaying, setIsPlaying] = React.useState(false)
   const [ready, setReady] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
+  const [position, setPosition] = React.useState<PlaybackPosition | null>(null)
+  const [activeBeat, setActiveBeat] = React.useState<ActiveBeat | null>(null)
+  const [isLooping, setIsLoopingState] = React.useState(false)
+  const [selectionRange, setSelectionRange] = React.useState<SelectionRange | null>(null)
 
   // Which beat to keep in view. Re-applied after every render (not just when
   // the target changes) because editing a note can reflow the notation (e.g.
@@ -129,6 +153,14 @@ export function useAlphaTab(
     const onPlayerStateChanged = (e: { state: number }) => {
       const playing = e.state === 1
       setIsPlaying(playing)
+      // The "currently sounding" highlight (grid + notation cursor + progress
+      // bar selection shading) only makes sense while actually playing —
+      // otherwise it's just stuck showing wherever playback last was, which
+      // reads as a bug (e.g. still highlighted after pausing or restarting).
+      // alphaTab's own bar/beat cursor has no such toggle, so it's driven via
+      // this class instead (see the `.at-playing` rules in index.css).
+      if (!playing) setActiveBeat(null)
+      el.classList.toggle('at-playing', playing)
       // Hand scrolling over to alphaTab's own playback-cursor tracking only
       // while actually playing; back to our edit-cursor tracking otherwise.
       api.settings.player.scrollMode = playing ? ScrollMode.Continuous : ScrollMode.Off
@@ -148,14 +180,101 @@ export function useAlphaTab(
     }
     api.error.on(onError)
 
+    // alphaTab fires this many times a second (fine-grained enough to drive a
+    // smooth native cursor animation). Pushing a React state update on every
+    // single tick re-renders the whole page — including the grid editor's
+    // full table — dozens of times a second, which was competing with the
+    // audio thread for the main thread and causing audible crackling.
+    // Throttled here to a rate that's still smooth for a progress bar
+    // (~10/sec) but leaves the main thread free the rest of the time; seeks
+    // always go through immediately so scrubbing still feels responsive.
+    const POSITION_THROTTLE_MS = 100
+    let lastPositionUpdate = 0
+    const onPositionChanged = (e: {
+      currentTime: number
+      endTime: number
+      currentTick: number
+      endTick: number
+      isSeek: boolean
+    }) => {
+      const now = performance.now()
+      if (!e.isSeek && now - lastPositionUpdate < POSITION_THROTTLE_MS) return
+      lastPositionUpdate = now
+      setPosition({
+        currentTime: e.currentTime,
+        endTime: e.endTime,
+        currentTick: e.currentTick,
+        endTick: e.endTick,
+      })
+    }
+    api.playerPositionChanged.on(onPositionChanged)
+
+    // Which beat is actually sounding right now, for highlighting the
+    // current note/bar outside of alphaTab's own cursor (e.g. in the grid
+    // editor). Bar/beat index here is the same scheme `scrollToCursor` above
+    // already relies on — one grid column is always exactly one beat.
+    const onActiveBeatsChanged = (e: { activeBeats: Beat[] }) => {
+      const beat = e.activeBeats[0]
+      setActiveBeat(beat ? { barIndex: beat.voice.bar.index, beatIndex: beat.index } : null)
+    }
+    api.activeBeatsChanged.on(onActiveBeatsChanged)
+
+    const onPlaybackRangeChanged = (e: { playbackRange: { startTick: number; endTick: number } | null }) => {
+      setSelectionRange(
+        e.playbackRange
+          ? { startTick: e.playbackRange.startTick, endTick: e.playbackRange.endTick }
+          : null,
+      )
+    }
+    api.playbackRangeChanged.on(onPlaybackRangeChanged)
+
+    // Click-and-drag on the rendered notation to mark a range: mousedown
+    // remembers the start beat, mousemove live-previews the range via
+    // alphaTab's own highlight (doesn't affect playback yet), mouseup either
+    // commits it (if the drag actually moved to a different beat) or clears
+    // any existing selection (a plain click with no drag).
+    let dragStartBeat: Beat | null = null
+    let dragMoved = false
+    const onBeatMouseDown = (beat: Beat) => {
+      dragStartBeat = beat
+      dragMoved = false
+    }
+    const onBeatMouseMove = (beat: Beat) => {
+      if (!dragStartBeat) return
+      if (beat !== dragStartBeat) dragMoved = true
+      api.highlightPlaybackRange(dragStartBeat, beat)
+    }
+    const onBeatMouseUp = (beat: Beat | null) => {
+      if (dragStartBeat && dragMoved && beat) {
+        api.applyPlaybackRangeFromHighlight()
+      } else {
+        api.clearPlaybackRangeHighlight()
+        api.playbackRange = null
+      }
+      dragStartBeat = null
+      dragMoved = false
+    }
+    api.beatMouseDown.on(onBeatMouseDown)
+    api.beatMouseMove.on(onBeatMouseMove)
+    api.beatMouseUp.on(onBeatMouseUp)
+
     return () => {
       api.playerStateChanged.off(onPlayerStateChanged)
       api.postRenderFinished.off(applyScroll)
       api.error.off(onError)
+      api.playerPositionChanged.off(onPositionChanged)
+      api.activeBeatsChanged.off(onActiveBeatsChanged)
+      api.playbackRangeChanged.off(onPlaybackRangeChanged)
+      api.beatMouseDown.off(onBeatMouseDown)
+      api.beatMouseMove.off(onBeatMouseMove)
+      api.beatMouseUp.off(onBeatMouseUp)
       api.destroy()
       apiRef.current = null
       applyScrollRef.current = () => {}
       setReady(false)
+      setPosition(null)
+      setActiveBeat(null)
+      setSelectionRange(null)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -171,6 +290,11 @@ export function useAlphaTab(
 
   const stop = React.useCallback(() => {
     apiRef.current?.stop()
+    // `stop()` while already paused doesn't fire `playerStateChanged` (the
+    // state isn't actually changing), so the "currently sounding" highlight
+    // needs clearing here too, not just in that handler — otherwise
+    // restarting from a paused state left it stuck on wherever it was.
+    setActiveBeat(null)
   }, [])
 
   const scrollToCursor = React.useCallback((barIndex: number, beatIndex: number) => {
@@ -186,5 +310,64 @@ export function useAlphaTab(
     api.render()
   }, [])
 
-  return { ready, isPlaying, error, setTex, playPause, stop, scrollToCursor, setLayoutMode }
+  const seek = React.useCallback((ms: number) => {
+    const api = apiRef.current
+    if (!api) return
+    api.timePosition = ms
+  }, [])
+
+  const setLooping = React.useCallback((value: boolean) => {
+    const api = apiRef.current
+    if (!api) return
+    api.isLooping = value
+    setIsLoopingState(value)
+  }, [])
+
+  const clearSelection = React.useCallback(() => {
+    const api = apiRef.current
+    if (!api) return
+    api.clearPlaybackRangeHighlight()
+    api.playbackRange = null
+  }, [])
+
+  // Loops just the given bar/beat range — the grid's own selection ("tocar
+  // esse trecho" in the selection pill) reuses the exact same playback-range
+  // mechanism as dragging on the rendered notation above, via alphaTab's own
+  // beat-to-tick lookup, instead of recomputing tick math by hand.
+  const playRange = React.useCallback(
+    (startBarIndex: number, startBeatIndex: number, endBarIndex: number, endBeatIndex: number) => {
+      const api = apiRef.current
+      if (!api) return
+      const staff = api.score?.tracks[0]?.staves[0]
+      const startBeat = staff?.bars[startBarIndex]?.voices[0]?.beats[startBeatIndex]
+      const endBeat = staff?.bars[endBarIndex]?.voices[0]?.beats[endBeatIndex]
+      if (!startBeat || !endBeat) return
+      api.highlightPlaybackRange(startBeat, endBeat)
+      api.applyPlaybackRangeFromHighlight()
+      api.isLooping = true
+      setIsLoopingState(true)
+      api.play()
+    },
+    [],
+  )
+
+  return {
+    ready,
+    isPlaying,
+    error,
+    setTex,
+    playPause,
+    stop,
+    scrollToCursor,
+    setLayoutMode,
+    position,
+    activeBeat,
+    seek,
+    isLooping,
+    setLooping,
+    hasSelection: selectionRange !== null,
+    selectionRange,
+    clearSelection,
+    playRange,
+  }
 }

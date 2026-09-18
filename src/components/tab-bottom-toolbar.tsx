@@ -10,11 +10,13 @@ import {
   Pause,
   Play,
   Plus,
+  Repeat,
   RotateCcw,
   Save,
   Settings2,
   StretchHorizontal,
   WrapText,
+  X,
 } from 'lucide-react'
 
 import { ShortcutsPanel } from '@/components/shortcuts-panel'
@@ -57,6 +59,12 @@ interface TabBottomToolbarProps {
   onToggleShowScore: () => void
   showNoteNames: boolean
   onToggleShowNoteNames: () => void
+  letRingParens: boolean
+  onToggleLetRingParens: () => void
+  isLooping: boolean
+  onToggleLoop: () => void
+  hasSelection: boolean
+  onClearSelection: () => void
 }
 
 export function TabBottomToolbar({
@@ -84,6 +92,12 @@ export function TabBottomToolbar({
   onToggleShowScore,
   showNoteNames,
   onToggleShowNoteNames,
+  letRingParens,
+  onToggleLetRingParens,
+  isLooping,
+  onToggleLoop,
+  hasSelection,
+  onClearSelection,
 }: TabBottomToolbarProps) {
   const isHorizontal = layoutMode === LayoutMode.Horizontal
   return (
@@ -113,6 +127,34 @@ export function TabBottomToolbar({
           {isPlaying ? <Pause /> : <Play />}
           {isPlaying ? 'Pausar' : 'Reproduzir'}
         </Button>
+
+        <Button
+          variant={isLooping ? 'secondary' : 'ghost'}
+          size="icon"
+          className="rounded-full"
+          onClick={onToggleLoop}
+          aria-label="Repetir em loop"
+          title={
+            hasSelection
+              ? 'Repetir em loop o trecho marcado'
+              : 'Repetir a música inteira em loop'
+          }
+        >
+          <Repeat />
+        </Button>
+
+        {hasSelection && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="rounded-full"
+            onClick={onClearSelection}
+            aria-label="Remover marcação do trecho"
+            title="Remover marcação do trecho"
+          >
+            <X />
+          </Button>
+        )}
 
         <span className="mx-1 h-6 w-px bg-border" />
 
@@ -208,6 +250,12 @@ export function TabBottomToolbar({
               onCheckedChange={onToggleShowNoteNames}
             >
               Mostrar nome das notas
+            </DropdownMenuCheckboxItem>
+            <DropdownMenuCheckboxItem
+              checked={letRingParens}
+              onCheckedChange={onToggleLetRingParens}
+            >
+              Let ring com parênteses
             </DropdownMenuCheckboxItem>
           </DropdownMenuContent>
         </DropdownMenu>

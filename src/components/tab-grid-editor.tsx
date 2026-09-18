@@ -5,12 +5,21 @@ import { BEND_LABELS, DEFAULT_BEATS_PER_BAR, type BendData, type TabGrid } from 
 import { noteNameAtFret } from '@/lib/note-utils'
 import type { InstrumentConfig } from '@/types'
 
+/** Pixel size of one grid column / the sticky corner column — must match the
+ * `w-10` (2.5rem) classes on the `<td>`s below. Exported so the floating
+ * selection pill can anchor itself to a column range using plain arithmetic
+ * instead of measuring the DOM. */
+export const GRID_COLUMN_WIDTH_PX = 40
+export const GRID_CORNER_WIDTH_PX = 40
+
 const EFFECT_LABEL: Record<string, string> = {
   h: 'h',
   p: 'p',
   sl: '/',
   sib: '/',
   sia: '\\',
+  sou: '↗',
+  sod: '↘',
   pm: 'PM',
   v: '~',
   nh: 'nh',
@@ -41,6 +50,11 @@ function hammerPullLabel(grid: TabGrid, colIndex: number, stringNo: number, fret
   return null
 }
 
+export interface GridSelection {
+  start: number
+  end: number
+}
+
 interface TabGridEditorProps {
   grid: TabGrid
   instrument: InstrumentConfig
@@ -49,9 +63,29 @@ interface TabGridEditorProps {
   onSelectCell?: (col: number, stringNo: number) => void
   beatsPerBar?: number
   showNoteNames?: boolean
+  /** Column currently sounding during playback (from alphaTab's
+   * `activeBeatsChanged`), if any — distinct from `cursor`, which is where
+   * the user is editing. Highlights that column plus the rest of its bar. */
+  activeColumn?: number | null
+  /** Column range selected by click-hold-drag, if any — shaded across every
+   * string, independent of the single-cell `cursor`. */
+  selection?: GridSelection | null
+  onCellMouseDown?: (col: number) => void
+  onCellMouseEnter?: (col: number) => void
+  onCellMouseUp?: () => void
+  /** Attached to the horizontally-scrolling wrapper so the selection pill
+   * (rendered by the parent, outside this memoized component) can anchor
+   * itself to the selection's on-screen position. */
+  scrollContainerRef?: React.Ref<HTMLDivElement>
 }
 
-export function TabGridEditor({
+// The grid renders one <td> per string per beat, so a full re-render can mean
+// hundreds of cells — memoized because during playback the page re-renders on
+// every throttled position tick, and none of that touches this component's
+// props except `activeColumn` (and even that only a few times a second).
+// Re-rendering it anyway measurably competed with audio playback for the
+// main thread and caused audible crackling.
+export const TabGridEditor = React.memo(function TabGridEditor({
   grid,
   instrument,
   cursor,
@@ -59,7 +93,15 @@ export function TabGridEditor({
   onSelectCell,
   beatsPerBar = DEFAULT_BEATS_PER_BAR,
   showNoteNames = false,
+  activeColumn = null,
+  selection = null,
+  onCellMouseDown,
+  onCellMouseEnter,
+  onCellMouseUp,
+  scrollContainerRef,
 }: TabGridEditorProps) {
+  const activeBarStart =
+    activeColumn != null ? Math.floor(activeColumn / beatsPerBar) * beatsPerBar : null
   const stringsHighToLow = [...instrument.tuning].reverse()
   const cursorCellRef = React.useRef<HTMLTableCellElement>(null)
 
@@ -68,13 +110,21 @@ export function TabGridEditor({
   }, [cursor.col, cursor.string])
 
   return (
-    <div className="overflow-x-auto overscroll-x-contain rounded-lg border border-border bg-card">
+    <div
+      ref={scrollContainerRef}
+      className="overflow-x-auto overscroll-x-contain rounded-lg border border-border bg-card"
+    >
       <table className="border-collapse text-sm">
         <tbody>
           <tr>
             <td className="sticky left-0 z-10 w-10 shrink-0 border-r border-border bg-card" />
             {grid.columns.map((column, colIndex) => {
               const barStart = colIndex % beatsPerBar === 0 && colIndex > 0
+              const inActiveBar =
+                activeBarStart !== null &&
+                colIndex >= activeBarStart &&
+                colIndex < activeBarStart + beatsPerBar
+              const inSelection = selection !== null && colIndex >= selection.start && colIndex <= selection.end
               const stroke = column.beatEffects.includes('su')
                 ? '↑'
                 : column.beatEffects.includes('sd')
@@ -86,6 +136,9 @@ export function TabGridEditor({
                   className={cn(
                     'h-4 w-10 px-0 py-0 text-center align-middle text-xs leading-none font-bold text-primary',
                     barStart && 'border-l-2 border-l-border',
+                    inActiveBar && 'bg-accent/10',
+                    colIndex === activeColumn && 'bg-accent/25',
+                    inSelection && 'bg-primary/15',
                   )}
                 >
                   {stroke}
@@ -104,14 +157,26 @@ export function TabGridEditor({
                   const isCursor = cursor.col === colIndex && cursor.string === stringNo
                   const cell = column.cells[stringNo]
                   const barStart = colIndex % beatsPerBar === 0 && colIndex > 0
+                  const inActiveBar =
+                    activeBarStart !== null &&
+                    colIndex >= activeBarStart &&
+                    colIndex < activeBarStart + beatsPerBar
+                  const inSelection =
+                    selection !== null && colIndex >= selection.start && colIndex <= selection.end
                   return (
                     <td
                       key={colIndex}
                       ref={isCursor ? cursorCellRef : undefined}
                       onClick={() => onSelectCell?.(colIndex, stringNo)}
+                      onMouseDown={() => onCellMouseDown?.(colIndex)}
+                      onMouseEnter={() => onCellMouseEnter?.(colIndex)}
+                      onMouseUp={() => onCellMouseUp?.()}
                       className={cn(
-                        'h-10 w-10 min-h-10 cursor-pointer px-0 py-0.5 text-center align-middle font-mono border-b border-border',
+                        'h-10 w-10 min-h-10 cursor-pointer px-0 py-0.5 text-center align-middle font-mono border-b border-border select-none',
                         barStart && 'border-l-2 border-l-border',
+                        inActiveBar && 'bg-accent/10',
+                        colIndex === activeColumn && 'bg-accent/25',
+                        inSelection && 'bg-primary/15',
                       )}
                     >
                       <div
@@ -166,4 +231,4 @@ export function TabGridEditor({
       </table>
     </div>
   )
-}
+})

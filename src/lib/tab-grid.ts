@@ -7,11 +7,27 @@ import type { InstrumentConfig } from '@/types'
  * `sl` connects to the following note (its direction is inferred from pitch too).
  * `sib`/`sia` mark a slide with no defined starting fret — the note is entered
  * by sliding up from below (`sib`) or down from above (`sia`) an unspecified fret.
+ * `sou`/`sod` mark a slide *out* with no defined landing fret — the finger
+ * slides off the fretboard upward (`sou`) or downward (`sod`) after the note,
+ * the mirror image of `sib`/`sia`. Mutually exclusive with `sl`/each other,
+ * same as `sib`/`sia` are with each other — a note only slides out one way.
  * `lr` (let ring) marks the note as tied into the next occurrence of the same
  * pitch on the same string, so it keeps ringing instead of being cut off —
  * mark both the starting note and the note it rings into. See `effectToTex`
  * for why this compiles to a tie rather than alphaTex's own `lr` tag. */
-export type NoteEffect = 'h' | 'p' | 'sl' | 'sib' | 'sia' | 'pm' | 'v' | 'nh' | 'ph' | 'lr'
+export type NoteEffect =
+  | 'h'
+  | 'p'
+  | 'sl'
+  | 'sib'
+  | 'sia'
+  | 'sou'
+  | 'sod'
+  | 'pm'
+  | 'v'
+  | 'nh'
+  | 'ph'
+  | 'lr'
 
 /** Beat-level alphaTex property tags. `su`/`sd` mark the pick-stroke direction
  * (up/down) shown above the beat; they're mutually exclusive with each other. */
@@ -72,8 +88,21 @@ export interface Column {
   beatEffects: BeatEffect[]
 }
 
+/** A tempo override bounded to `[startBar, endBar]` (inclusive) — playback
+ * reverts to whatever tempo was in effect before `startBar` as soon as
+ * `endBar` ends. Bounded (rather than "from here to the end of the piece")
+ * so that raising the tab's base BPM always speeds up every bar that isn't
+ * explicitly overridden, instead of a stale override silently continuing to
+ * dictate most of the piece's actual playback speed. */
+export interface TempoChange {
+  startBar: number
+  endBar: number
+  bpm: number
+}
+
 export interface TabGrid {
   columns: Column[]
+  tempoChanges?: TempoChange[]
 }
 
 export const DEFAULT_BEATS_PER_BAR = 4
@@ -86,7 +115,33 @@ export const DEFAULT_BEATS_PER_BAR = 4
 export const BEATS_PER_BAR_OPTIONS = [2, 3, 4, 5, 6] as const
 
 export function createEmptyGrid(bars = 4, beatsPerBar = DEFAULT_BEATS_PER_BAR): TabGrid {
-  return { columns: Array.from({ length: bars * beatsPerBar }, () => emptyColumn()) }
+  return { columns: Array.from({ length: bars * beatsPerBar }, () => emptyColumn()), tempoChanges: [] }
+}
+
+/** The tempo in effect at `bar` — the override covering it, if any, otherwise
+ * the tab's base BPM. Overlapping ranges shouldn't exist (see
+ * `setTempoChangeForRange`), so at most one covers any given bar. */
+export function effectiveBpmAtBar(tempoChanges: TempoChange[], bar: number, baseBpm: number): number {
+  const covering = tempoChanges.find((tc) => bar >= tc.startBar && bar <= tc.endBar)
+  return covering ? covering.bpm : baseBpm
+}
+
+/** Sets (or, with `bpm: null`, clears) the tempo override covering
+ * `[startBar, endBar]`. Any existing override that overlaps this range is
+ * replaced outright rather than clipped — ranges never partially overlap. */
+export function setTempoChangeForRange(
+  grid: TabGrid,
+  startBar: number,
+  endBar: number,
+  bpm: number | null,
+): TabGrid {
+  const existing = grid.tempoChanges ?? []
+  const withoutOverlap = existing.filter((tc) => tc.endBar < startBar || tc.startBar > endBar)
+  if (bpm === null) return { ...grid, tempoChanges: withoutOverlap }
+  return {
+    ...grid,
+    tempoChanges: [...withoutOverlap, { startBar, endBar, bpm }].sort((a, b) => a.startBar - b.startBar),
+  }
 }
 
 export function emptyColumn(): Column {
@@ -111,15 +166,43 @@ function tuningToAlphaTex(tuningLowToHigh: string[]): string {
 
 /** `p` (pull-off) has no dedicated alphaTex tag — alphaTab derives hammer-on vs.
  * pull-off display from the pitch difference between notes, so both compile to `h`. */
-/** `lr` (let ring) compiles to a tie (`t`) rather than alphaTex's own `lr` tag:
- * `lr` draws as a "Let Ring" label plus a dashed line above the staff, but a
- * tie draws as a plain slur — visually identical to a hammer-on/pull-off arc,
- * just without the H/P letter — which reads much more clearly as "this note
- * keeps ringing into the next one" in a guitar tab. */
-function effectToTex(effect: NoteEffect): string {
+function effectToTex(effect: Exclude<NoteEffect, 'lr'>): string {
   if (effect === 'p') return 'h'
-  if (effect === 'lr') return 't'
   return effect
+}
+
+/** `lr` (let ring) has two rendering styles in the wild, both kept as a global
+ * display toggle (`letRingParens`) rather than per-note, since which one a
+ * given tab uses is a style choice, not something that varies note to note:
+ *
+ * - With parens: the note is marked as a tied note (alphaTab's own `t` tag,
+ *   same as the app already used before this toggle existed). alphaTab only
+ *   ever shows a tied note's fret number — in parens — when it falls on the
+ *   first beat of a bar or carries a bend; everywhere else a tied note
+ *   renders with no number at all, just the slur curve into it.
+ * - Without parens: the ringing note is marked with alphaTab's native `lr`
+ *   tag instead (drawn as a dashed "let ring" line above the staff), and the
+ *   note(s) it rings into are left as plain, untagged notes — so their fret
+ *   number always shows normally, never in parens.
+ *
+ * `lrOpenByString` tracks, per string, whether the previous `lr`-marked note
+ * on that string is still waiting for its "rings into" note — i.e. whether
+ * the *next* `lr`-marked note on that string is the origin of a new pair or
+ * the destination completing the current one. Only relevant to the
+ * without-parens style; the parens style tags every `lr` note the same way
+ * regardless of position, matching the original implementation exactly. */
+function letRingTag(
+  stringNo: number,
+  letRingParens: boolean,
+  lrOpenByString: Set<number>,
+): string | null {
+  if (letRingParens) return 't'
+  if (lrOpenByString.has(stringNo)) {
+    lrOpenByString.delete(stringNo)
+    return null
+  }
+  lrOpenByString.add(stringNo)
+  return 'lr'
 }
 
 /** alphaTex requires the bend effect to carry explicit bend points; a bare
@@ -132,13 +215,21 @@ function bendToTex(bend: BendData): string {
   return bend.kind === 'prebend' ? `b (${bend.amount} 0)` : `b (0 ${bend.amount})`
 }
 
-function columnToTex(column: Column): string {
+function columnToTex(
+  column: Column,
+  letRingParens: boolean,
+  lrOpenByString: Set<number>,
+): string {
   const entries = Object.entries(column.cells)
   if (entries.length === 0) return 'r'
 
-  const notes = entries.map(([stringNo, cell]) => {
+  const notes = entries.map(([stringNoStr, cell]) => {
+    const stringNo = Number(stringNoStr)
+    const isLetRing = cell.effects.includes('lr')
+    const lrTag = isLetRing ? letRingTag(stringNo, letRingParens, lrOpenByString) : null
     const parts = [
-      ...cell.effects.map(effectToTex),
+      ...cell.effects.filter((e): e is Exclude<NoteEffect, 'lr'> => e !== 'lr').map(effectToTex),
+      ...(lrTag ? [lrTag] : []),
       ...(cell.bend ? [bendToTex(cell.bend)] : []),
     ]
     const effects = parts.length ? `{${parts.join(' ')}}` : ''
@@ -167,6 +258,7 @@ export function gridToAlphaTex(
   sound = DEFAULT_SOUND,
   beatsPerBar = DEFAULT_BEATS_PER_BAR,
   showScore = false,
+  letRingParens = true,
 ): string {
   const tuning = tuningToAlphaTex(instrument.tuning)
   const header = [
@@ -178,10 +270,23 @@ export function gridToAlphaTex(
     `\\tuning (${tuning})`,
   ].join('\n')
 
+  // Bar-scoped `\tempo` directives change alphaTab's playback tempo starting
+  // at that bar — how per-section speed-up/slow-down markers reach the
+  // player. Emitted only where the effective tempo actually changes from the
+  // previous bar, so a bounded `TempoChange` naturally gets a second
+  // directive reverting to the base BPM right after it ends.
+  const tempoChanges = grid.tempoChanges ?? []
+
   const bars: string[] = []
+  const lrOpenByString = new Set<number>()
+  let previousEffectiveBpm = bpm
   for (let i = 0; i < grid.columns.length; i += beatsPerBar) {
+    const barIndex = i / beatsPerBar
     const barColumns = grid.columns.slice(i, i + beatsPerBar)
-    bars.push(barColumns.map(columnToTex).join(' '))
+    const effectiveBpm = effectiveBpmAtBar(tempoChanges, barIndex, bpm)
+    const tempoPrefix = effectiveBpm !== previousEffectiveBpm ? `\\tempo ${effectiveBpm} ` : ''
+    previousEffectiveBpm = effectiveBpm
+    bars.push(tempoPrefix + barColumns.map((c) => columnToTex(c, letRingParens, lrOpenByString)).join(' '))
   }
   if (bars.length === 0) bars.push(Array.from({ length: beatsPerBar }, () => 'r').join(' '))
 

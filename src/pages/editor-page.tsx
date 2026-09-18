@@ -4,8 +4,10 @@ import { ArrowLeft } from 'lucide-react'
 import { LayoutMode } from '@coderline/alphatab'
 
 import { FRETBOARD_MAX_FRET, FretboardPicker } from '@/components/fretboard-picker'
+import { GridSelectionPill } from '@/components/grid-selection-pill'
+import { PlaybackProgressBar } from '@/components/playback-progress-bar'
 import { TabBottomToolbar } from '@/components/tab-bottom-toolbar'
-import { TabGridEditor } from '@/components/tab-grid-editor'
+import { TabGridEditor, type GridSelection } from '@/components/tab-grid-editor'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { useAlphaTab } from '@/hooks/use-alpha-tab'
@@ -16,12 +18,14 @@ import {
   type BeatEffect,
   type BendData,
   type BendKind,
+  type Column,
   type NoteEffect,
   type TabGrid,
   barCount,
   deserializeGrid,
   gridToAlphaTex,
   serializeGrid,
+  setTempoChangeForRange,
 } from '@/lib/tab-grid'
 import { fretForNote, normalizeNoteName } from '@/lib/note-utils'
 import { useLibrary } from '@/store/library-store'
@@ -36,6 +40,8 @@ const BPM_STEP = 5
 const LAYOUT_MODE_STORAGE_KEY = 'tableak.layoutMode'
 const SHOW_SCORE_STORAGE_KEY = 'tableak.showScore'
 const SHOW_NOTE_NAMES_STORAGE_KEY = 'tableak.showNoteNames'
+const LET_RING_PARENS_STORAGE_KEY = 'tableak.letRingParens'
+const SLASH_DOUBLE_TAP_MS = 400
 
 /** Notation layout is a display preference, not tab content — kept in
  * localStorage (shared across tabs) instead of the saved tab data. */
@@ -79,6 +85,15 @@ export function EditorPage() {
     error: alphaTabError,
     scrollToCursor,
     setLayoutMode,
+    position,
+    activeBeat,
+    seek,
+    isLooping,
+    setLooping,
+    hasSelection,
+    selectionRange,
+    clearSelection,
+    playRange,
   } = useAlphaTab(containerRef, layoutMode)
 
   const [grid, setGrid] = React.useState<TabGrid>(() => deserializeGrid(tab?.content ?? null))
@@ -90,6 +105,9 @@ export function EditorPage() {
   )
   const [showNoteNames, setShowNoteNames] = React.useState(() =>
     getInitialBooleanPref(SHOW_NOTE_NAMES_STORAGE_KEY, true),
+  )
+  const [letRingParens, setLetRingParens] = React.useState(() =>
+    getInitialBooleanPref(LET_RING_PARENS_STORAGE_KEY, true),
   )
   const [cursor, setCursor] = React.useState({ col: 0, string: 1 })
   const [digitBuffer, setDigitBuffer] = React.useState('')
@@ -103,19 +121,47 @@ export function EditorPage() {
   const savedFeedbackTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
   const pendingNoteRef = React.useRef<{ col: number; string: number; letter: string } | null>(null)
   const pendingNoteTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastSlashPressRef = React.useRef<number>(0)
+
+  // Click-hold-drag range selection in the grid (distinct from `cursor`,
+  // which is the single-cell edit position). Used for copy/delete/move and
+  // for scoping a tempo change / loop playback to a specific stretch.
+  const [gridSelection, setGridSelection] = React.useState<GridSelection | null>(null)
+  const gridScrollRef = React.useRef<HTMLDivElement>(null)
+  const gridDragRef = React.useRef<{
+    mode: 'select' | 'move'
+    anchorCol: number
+    origStart: number
+    origEnd: number
+    previewStart: number
+    moved: boolean
+  } | null>(null)
+  const justDraggedRef = React.useRef(false)
+  const clipboardRef = React.useRef<Column[] | null>(null)
 
   const stringCount = tab?.instrumentConfig.strings ?? 6
   const bars = barCount(grid, beatsPerBar)
   const atBarLimit = bars >= maxBarsPerTab
+  const activeColumn =
+    activeBeat != null ? activeBeat.barIndex * beatsPerBar + activeBeat.beatIndex : null
 
   // Regenerate the AlphaTab render whenever the underlying grid, tempo, time
   // signature, or notation display preferences change.
   React.useEffect(() => {
     if (!tab) return
     setTex(
-      gridToAlphaTex(tab.name, tab.instrumentConfig, grid, bpm, sound, beatsPerBar, showScore),
+      gridToAlphaTex(
+        tab.name,
+        tab.instrumentConfig,
+        grid,
+        bpm,
+        sound,
+        beatsPerBar,
+        showScore,
+        letRingParens,
+      ),
     )
-  }, [grid, bpm, sound, beatsPerBar, showScore, tab, setTex])
+  }, [grid, bpm, sound, beatsPerBar, showScore, letRingParens, tab, setTex])
 
   // Keep the notation preview scrolled to where the cursor currently is —
   // reapplied by the hook after every render too, so editing far into the
@@ -194,12 +240,126 @@ export function EditorPage() {
 
   const handleSelectCell = React.useCallback(
     (col: number, stringNo: number) => {
+      // A plain click also fires right after a drag-select/drag-move
+      // finishes (mouseup's click event targets whatever cell the pointer
+      // is over) — skip the click's own effects there so it doesn't
+      // immediately move the cursor into and clear the selection just made.
+      if (justDraggedRef.current) {
+        justDraggedRef.current = false
+        return
+      }
       commitDigitBuffer()
       ensureColumn(col)
       setCursor({ col, string: stringNo })
+      setGridSelection(null)
     },
     [commitDigitBuffer, ensureColumn],
   )
+
+  const handleCellMouseDown = React.useCallback(
+    (col: number) => {
+      if (gridSelection && col >= gridSelection.start && col <= gridSelection.end) {
+        gridDragRef.current = {
+          mode: 'move',
+          anchorCol: col,
+          origStart: gridSelection.start,
+          origEnd: gridSelection.end,
+          previewStart: gridSelection.start,
+          moved: false,
+        }
+      } else {
+        gridDragRef.current = {
+          mode: 'select',
+          anchorCol: col,
+          origStart: col,
+          origEnd: col,
+          previewStart: col,
+          moved: false,
+        }
+      }
+    },
+    [gridSelection],
+  )
+
+  const handleCellMouseEnter = React.useCallback(
+    (col: number) => {
+      const drag = gridDragRef.current
+      if (!drag) return
+      if (col !== drag.anchorCol) drag.moved = true
+      if (drag.mode === 'select') {
+        const start = Math.min(drag.anchorCol, col)
+        const end = Math.max(drag.anchorCol, col)
+        drag.previewStart = start
+        setGridSelection(start === end ? null : { start, end })
+      } else {
+        const length = drag.origEnd - drag.origStart + 1
+        const delta = col - drag.anchorCol
+        const maxStart = Math.max(0, maxBarsPerTab * beatsPerBar - length)
+        const newStart = Math.max(0, Math.min(drag.origStart + delta, maxStart))
+        drag.previewStart = newStart
+        setGridSelection({ start: newStart, end: newStart + length - 1 })
+      }
+    },
+    [maxBarsPerTab, beatsPerBar],
+  )
+
+  const handleCellMouseUp = React.useCallback(() => {
+    const drag = gridDragRef.current
+    gridDragRef.current = null
+    if (!drag) return
+    if (drag.moved) justDraggedRef.current = true
+    if (drag.mode === 'move' && drag.previewStart !== drag.origStart) {
+      setGrid((g) => moveColumnRange(g, drag.origStart, drag.origEnd, drag.previewStart))
+    }
+  }, [])
+
+  // Safety net for a drag that ends outside the grid entirely (mouse
+  // released over the toolbar, etc.) — the per-cell mouseup above won't
+  // fire there, so the drag would otherwise never get finalized.
+  React.useEffect(() => {
+    window.addEventListener('mouseup', handleCellMouseUp)
+    return () => window.removeEventListener('mouseup', handleCellMouseUp)
+  }, [handleCellMouseUp])
+
+  const handleSetTempoForSelection = React.useCallback(
+    (bpm: number | null) => {
+      if (!gridSelection) return
+      const startBar = Math.floor(gridSelection.start / beatsPerBar)
+      const endBar = Math.floor(gridSelection.end / beatsPerBar)
+      setGrid((g) => setTempoChangeForRange(g, startBar, endBar, bpm))
+    },
+    [gridSelection, beatsPerBar],
+  )
+
+  const handlePlaySelection = React.useCallback(() => {
+    if (!gridSelection) return
+    const startBar = Math.floor(gridSelection.start / beatsPerBar)
+    const startBeat = gridSelection.start % beatsPerBar
+    const endBar = Math.floor(gridSelection.end / beatsPerBar)
+    const endBeat = gridSelection.end % beatsPerBar
+    playRange(startBar, startBeat, endBar, endBeat)
+  }, [gridSelection, beatsPerBar, playRange])
+
+  const handleCopySelection = React.useCallback(() => {
+    if (!gridSelection) return
+    clipboardRef.current = grid.columns.slice(gridSelection.start, gridSelection.end + 1)
+  }, [gridSelection, grid])
+
+  const handleDeleteSelection = React.useCallback(() => {
+    if (!gridSelection) return
+    setGrid((g) => clearColumnRange(g, gridSelection.start, gridSelection.end))
+  }, [gridSelection])
+
+  const handleCloseSelection = React.useCallback(() => {
+    setGridSelection(null)
+  }, [])
+
+  const handlePaste = React.useCallback(() => {
+    const clip = clipboardRef.current
+    if (!clip || clip.length === 0) return
+    commitDigitBuffer()
+    setGrid((g) => insertColumnsAt(g, cursor.col, clip, maxBarsPerTab * beatsPerBar))
+  }, [cursor.col, maxBarsPerTab, beatsPerBar, commitDigitBuffer])
 
   const commitPick = React.useCallback(
     (stringNo: number, fret: number) => {
@@ -282,6 +442,18 @@ export function EditorPage() {
     })
   }, [])
 
+  const handleToggleLetRingParens = React.useCallback(() => {
+    setLetRingParens((v) => {
+      const next = !v
+      window.localStorage.setItem(LET_RING_PARENS_STORAGE_KEY, String(next))
+      return next
+    })
+  }, [])
+
+  const handleToggleLoop = React.useCallback(() => {
+    setLooping(!isLooping)
+  }, [isLooping, setLooping])
+
   const handleRestart = React.useCallback(() => {
     commitDigitBuffer()
     stop()
@@ -337,6 +509,17 @@ export function EditorPage() {
         return
       }
 
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') {
+        e.preventDefault()
+        handleCopySelection()
+        return
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
+        e.preventDefault()
+        handlePaste()
+        return
+      }
+
       if (e.key === 'ArrowRight') {
         e.preventDefault()
         moveCursor(1)
@@ -363,13 +546,18 @@ export function EditorPage() {
       if (e.key === 'Escape') {
         commitDigitBuffer()
         setNoteNameMode(false)
+        setGridSelection(null)
         return
       }
 
       if (e.key === 'Backspace' || e.key === 'Delete') {
         e.preventDefault()
         setDigitBuffer('')
-        setGrid((g) => clearCell(g, cursor.col, cursor.string))
+        if (gridSelection) {
+          handleDeleteSelection()
+        } else {
+          setGrid((g) => clearCell(g, cursor.col, cursor.string))
+        }
         return
       }
 
@@ -441,19 +629,49 @@ export function EditorPage() {
         return
       }
 
+      // On Brazilian ABNT keyboards '~' is a dead key (used to compose ã/õ),
+      // so tapping it alone never produces e.key === '~' — the browser fires
+      // e.key === 'Dead' instead. Treat that the same as '~' so the vibrato
+      // shortcut works on those layouts too.
+      if (key === '~' || e.key === 'Dead') {
+        e.preventDefault()
+        commitDigitBuffer()
+        setGrid((g) => toggleNoteEffect(g, cursor.col, cursor.string, 'v'))
+        return
+      }
+
       const noteEffectByKey: Record<string, NoteEffect> = {
         h: 'h',
         p: 'p',
-        '/': 'sl',
-        '\\': 'sl',
+        s: 'sl',
         m: 'pm',
-        '~': 'v',
         l: 'lr',
       }
       if (key in noteEffectByKey) {
         e.preventDefault()
         commitDigitBuffer()
         setGrid((g) => toggleNoteEffect(g, cursor.col, cursor.string, noteEffectByKey[key]))
+        return
+      }
+
+      // Slide-out (no landing fret): '/' slides out upward, '\' downward —
+      // mirroring which way each glyph visually slants. Keyboards without a
+      // dedicated '\' key can still reach the downward slide by tapping '/'
+      // twice quickly, same threshold as the digit-buffer commit delay above.
+      if (key === '/' || key === '\\') {
+        e.preventDefault()
+        commitDigitBuffer()
+        let effect: NoteEffect = key === '\\' ? 'sod' : 'sou'
+        if (key === '/') {
+          const now = Date.now()
+          if (now - lastSlashPressRef.current < SLASH_DOUBLE_TAP_MS) {
+            effect = 'sod'
+            lastSlashPressRef.current = 0
+          } else {
+            lastSlashPressRef.current = now
+          }
+        }
+        setGrid((g) => toggleNoteEffect(g, cursor.col, cursor.string, effect))
         return
       }
       if (key === 'i') {
@@ -502,6 +720,10 @@ export function EditorPage() {
     pickerOpen,
     pickerSelection,
     commitPick,
+    gridSelection,
+    handleCopySelection,
+    handlePaste,
+    handleDeleteSelection,
   ])
 
   if (!tab) {
@@ -548,6 +770,8 @@ export function EditorPage() {
           {[...tab.instrumentConfig.tuning].reverse().join(' ')}
         </p>
 
+        <PlaybackProgressBar position={position} selectionRange={selectionRange} onSeek={seek} />
+
         <div
           ref={containerRef}
           className="h-[34rem] overflow-auto overscroll-contain rounded-lg border border-border bg-white p-2"
@@ -559,15 +783,40 @@ export function EditorPage() {
           </p>
         )}
 
-        <TabGridEditor
-          grid={grid}
-          instrument={tab.instrumentConfig}
-          cursor={cursor}
-          digitBuffer={digitBuffer}
-          onSelectCell={handleSelectCell}
-          beatsPerBar={beatsPerBar}
-          showNoteNames={showNoteNames}
-        />
+        <div className="relative">
+          <TabGridEditor
+            grid={grid}
+            instrument={tab.instrumentConfig}
+            cursor={cursor}
+            digitBuffer={digitBuffer}
+            onSelectCell={handleSelectCell}
+            beatsPerBar={beatsPerBar}
+            showNoteNames={showNoteNames}
+            activeColumn={activeColumn}
+            selection={gridSelection}
+            onCellMouseDown={handleCellMouseDown}
+            onCellMouseEnter={handleCellMouseEnter}
+            onCellMouseUp={handleCellMouseUp}
+            scrollContainerRef={gridScrollRef}
+          />
+          {gridSelection && (
+            <GridSelectionPill
+              key={`${gridSelection.start}-${gridSelection.end}`}
+              selection={gridSelection}
+              beatsPerBar={beatsPerBar}
+              scrollContainerRef={gridScrollRef}
+              baseBpm={bpm}
+              minBpm={MIN_BPM}
+              maxBpm={MAX_BPM}
+              tempoChanges={grid.tempoChanges ?? []}
+              onSetTempo={handleSetTempoForSelection}
+              onPlay={handlePlaySelection}
+              onCopy={handleCopySelection}
+              onDelete={handleDeleteSelection}
+              onClose={handleCloseSelection}
+            />
+          )}
+        </div>
 
         {atBarLimit && (
           <p className="text-xs text-muted-foreground">
@@ -616,6 +865,12 @@ export function EditorPage() {
         onToggleShowScore={handleToggleShowScore}
         showNoteNames={showNoteNames}
         onToggleShowNoteNames={handleToggleShowNoteNames}
+        letRingParens={letRingParens}
+        onToggleLetRingParens={handleToggleLetRingParens}
+        isLooping={isLooping}
+        onToggleLoop={handleToggleLoop}
+        hasSelection={hasSelection}
+        onClearSelection={clearSelection}
       />
     </div>
   )
@@ -637,6 +892,37 @@ function setCellFret(grid: TabGrid, col: number, stringNo: number, fret: number)
   return { columns }
 }
 
+/** Clears every cell (back to a rest) in `[start, end]` without changing the
+ * column count — the range-selection equivalent of the single-cell delete. */
+function clearColumnRange(grid: TabGrid, start: number, end: number): TabGrid {
+  const columns = grid.columns.map((column, i) => (i >= start && i <= end ? emptyColumnLocal() : column))
+  return { ...grid, columns }
+}
+
+/** Relocates `[start, end]` so it starts at `targetStart`, shifting whatever
+ * was in between to close the gap left behind and make room at the
+ * destination — a plain array-splice move, not a copy. */
+function moveColumnRange(grid: TabGrid, start: number, end: number, targetStart: number): TabGrid {
+  if (targetStart === start) return grid
+  const block = grid.columns.slice(start, end + 1)
+  const without = [...grid.columns.slice(0, start), ...grid.columns.slice(end + 1)]
+  const adjustedTarget = targetStart > end ? targetStart - block.length : targetStart
+  const clamped = Math.max(0, Math.min(adjustedTarget, without.length))
+  const columns = [...without.slice(0, clamped), ...block, ...without.slice(clamped)]
+  return { ...grid, columns }
+}
+
+/** Inserts `toInsert` at `index`, pushing everything from there onward to
+ * the right (never overwriting existing content) — how pasting a copied
+ * range lands in the tab. Extra columns past `maxColumns` are dropped rather
+ * than silently growing the tab past the plan's bar limit. */
+function insertColumnsAt(grid: TabGrid, index: number, toInsert: Column[], maxColumns: number): TabGrid {
+  const clampedIndex = Math.min(Math.max(0, index), grid.columns.length)
+  const merged = [...grid.columns.slice(0, clampedIndex), ...toInsert, ...grid.columns.slice(clampedIndex)]
+  const columns = merged.length > maxColumns ? merged.slice(0, maxColumns) : merged
+  return { ...grid, columns }
+}
+
 function clearCell(grid: TabGrid, col: number, stringNo: number): TabGrid {
   if (col >= grid.columns.length) return grid
   const columns = grid.columns.slice()
@@ -648,14 +934,19 @@ function clearCell(grid: TabGrid, col: number, stringNo: number): TabGrid {
   return { columns }
 }
 
-/** Hammer-on and pull-off describe the same slur in opposite directions, and
- * natural/pinch harmonics are two different ways to pluck the same note —
- * a note can't be both of either pair, so enabling one clears its opposite. */
-const MUTUALLY_EXCLUSIVE_EFFECTS: Partial<Record<NoteEffect, NoteEffect>> = {
-  h: 'p',
-  p: 'h',
-  nh: 'ph',
-  ph: 'nh',
+/** Hammer-on and pull-off describe the same slur in opposite directions,
+ * natural/pinch harmonics are two different ways to pluck the same note, and
+ * a note only slides out (or connects to the next note) one way — a note
+ * can't be more than one of any of these at once, so enabling one clears the
+ * others in its group. */
+const MUTUALLY_EXCLUSIVE_EFFECTS: Partial<Record<NoteEffect, NoteEffect[]>> = {
+  h: ['p'],
+  p: ['h'],
+  nh: ['ph'],
+  ph: ['nh'],
+  sl: ['sou', 'sod'],
+  sou: ['sl', 'sod'],
+  sod: ['sl', 'sou'],
 }
 
 function toggleNoteEffect(
@@ -669,10 +960,10 @@ function toggleNoteEffect(
   const cell = column.cells[stringNo]
   if (!cell) return grid
   const has = cell.effects.includes(effect)
-  const opposite = MUTUALLY_EXCLUSIVE_EFFECTS[effect]
+  const opposites = MUTUALLY_EXCLUSIVE_EFFECTS[effect] ?? []
   const effects = has
     ? cell.effects.filter((e) => e !== effect)
-    : [...cell.effects.filter((e) => e !== opposite), effect]
+    : [...cell.effects.filter((e) => !opposites.includes(e)), effect]
   const columns = grid.columns.slice()
   columns[col] = { ...column, cells: { ...column.cells, [stringNo]: { ...cell, effects } } }
   return { columns }

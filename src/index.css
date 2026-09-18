@@ -94,3 +94,41 @@ body {
 #root {
   min-height: 100svh;
 }
+
+/* alphaTab creates these cursor/selection overlay elements itself (see
+ * useAlphaTab's `enableCursor: true`) but ships with no default colors —
+ * styling them is left entirely to the host app. Without this they render
+ * fully transparent, i.e. the playback cursor and the current bar/selection
+ * highlight are computed and moved correctly but invisible.
+ *
+ * The bar/beat cursor is only shown while `.at-playing` is set on the
+ * container (toggled from `playerStateChanged` in useAlphaTab) — alphaTab
+ * itself always keeps it positioned somewhere (initially bar 1, wherever
+ * playback last was after a pause/stop), and showing that unconditionally
+ * reads as "stuck" rather than as a playback indicator. `.at-selection` is
+ * a user-made loop-range marking, not a playback position, so it stays
+ * visible regardless of play state. */
+.at-cursor-bar {
+  background: transparent;
+}
+
+.at-playing .at-cursor-bar {
+  background: color-mix(in oklch, var(--accent) 18%, transparent);
+}
+
+.at-cursor-beat {
+  width: 3px;
+}
+
+.at-playing .at-cursor-beat {
+  background: var(--primary);
+}
+
+.at-selection div {
+  background: color-mix(in oklch, var(--primary) 20%, transparent);
+}
+
+.at-highlight * {
+  fill: var(--primary) !important;
+  stroke: var(--primary) !important;
+}
