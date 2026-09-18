@@ -3,11 +3,15 @@ import type { InstrumentConfig } from '@/types'
 
 /** Note-level alphaTex property tags this editor can attach to a fretted note.
  * `h` and `p` are visually distinct (hammer-on vs pull-off) but both compile to
- * alphaTex's single `h` tag — alphaTab infers the actual direction from pitch. */
-export type NoteEffect = 'h' | 'p' | 'sl' | 'pm' | 'v' | 'nh'
+ * alphaTex's single `h` tag — alphaTab infers the actual direction from pitch.
+ * `sl` connects to the following note (its direction is inferred from pitch too).
+ * `sib`/`sia` mark a slide with no defined starting fret — the note is entered
+ * by sliding up from below (`sib`) or down from above (`sia`) an unspecified fret. */
+export type NoteEffect = 'h' | 'p' | 'sl' | 'sib' | 'sia' | 'pm' | 'v' | 'nh'
 
-/** Beat-level alphaTex property tags. */
-export type BeatEffect = 'tt'
+/** Beat-level alphaTex property tags. `su`/`sd` mark the pick-stroke direction
+ * (up/down) shown above the beat; they're mutually exclusive with each other. */
+export type BeatEffect = 'tt' | 'su' | 'sd'
 
 /** A bend that rises into the note, vs. a pre-bend that starts already bent
  * and (optionally) releases down. */
@@ -35,6 +39,11 @@ export interface Cell {
   fret: number
   effects: NoteEffect[]
   bend?: BendData
+  /** Dead/muted note — fretting hand mutes the string for a percussive thump
+   * with no defined pitch. Renders as alphaTex's `x` fret marker instead of
+   * `fret`, which is kept around so the picker/digit entry has a value to
+   * fall back to if the note is un-muted later. */
+  dead?: boolean
 }
 
 export interface Column {
@@ -99,7 +108,8 @@ function columnToTex(column: Column): string {
       ...(cell.bend ? [bendToTex(cell.bend)] : []),
     ]
     const effects = parts.length ? `{${parts.join(' ')}}` : ''
-    return `${cell.fret}.${stringNo}${effects}`
+    const fret = cell.dead ? 'x' : cell.fret
+    return `${fret}.${stringNo}${effects}`
   })
 
   const body = notes.length > 1 ? `(${notes.join(' ')})` : notes[0]
@@ -136,11 +146,40 @@ export function serializeGrid(grid: TabGrid): string {
   return JSON.stringify(grid)
 }
 
+/** Tabs saved before bends carried an explicit size stored `'b'` directly in
+ * `effects` (always rendered as a full-step bend-and-hold). Migrate that into
+ * the current `bend` field so old saves keep rendering instead of producing
+ * a bare `{b}` tag, which alphaTab's parser can't handle and aborts on. */
+function migrateLegacyBend(grid: TabGrid): TabGrid {
+  let changed = false
+  const columns = grid.columns.map((column) => {
+    let columnChanged = false
+    const cells: Column['cells'] = {}
+    for (const [stringNo, cell] of Object.entries(column.cells)) {
+      const legacyEffects = cell.effects as string[]
+      if (legacyEffects.includes('b')) {
+        columnChanged = true
+        cells[Number(stringNo)] = {
+          ...cell,
+          effects: cell.effects.filter((e) => (e as string) !== 'b'),
+          bend: cell.bend ?? { kind: 'bend', amount: 4 },
+        }
+      } else {
+        cells[Number(stringNo)] = cell
+      }
+    }
+    if (!columnChanged) return column
+    changed = true
+    return { ...column, cells }
+  })
+  return changed ? { columns } : grid
+}
+
 export function deserializeGrid(content: string | null): TabGrid {
   if (!content) return createEmptyGrid()
   try {
     const parsed = JSON.parse(content) as TabGrid
-    if (Array.isArray(parsed.columns)) return parsed
+    if (Array.isArray(parsed.columns)) return migrateLegacyBend(parsed)
   } catch {
     // fall through to empty grid
   }

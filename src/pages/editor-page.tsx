@@ -38,7 +38,8 @@ export function EditorPage() {
   const tab = tabId ? getTab(tabId) : undefined
 
   const containerRef = React.useRef<HTMLDivElement>(null)
-  const { setTex, playPause, stop, isPlaying, error: alphaTabError } = useAlphaTab(containerRef)
+  const { setTex, playPause, stop, isPlaying, error: alphaTabError, scrollToCursor } =
+    useAlphaTab(containerRef)
 
   const [grid, setGrid] = React.useState<TabGrid>(() => deserializeGrid(tab?.content ?? null))
   const [bpm, setBpm] = React.useState(tab?.bpm ?? 120)
@@ -65,15 +66,12 @@ export function EditorPage() {
     setTex(gridToAlphaTex(tab.name, tab.instrumentConfig, grid, bpm))
   }, [grid, bpm, tab, setTex])
 
-  // Keep the notation preview scrolled to where the cursor currently is.
+  // Keep the notation preview scrolled to where the cursor currently is —
+  // reapplied by the hook after every render too, so editing far into the
+  // tab while scrolled elsewhere in the preview still brings it into view.
   React.useEffect(() => {
-    const el = containerRef.current
-    if (!el) return
-    const maxScroll = el.scrollWidth - el.clientWidth
-    if (maxScroll <= 0) return
-    const totalCols = Math.max(grid.columns.length - 1, 1)
-    el.scrollTo({ left: (cursor.col / totalCols) * maxScroll, behavior: 'smooth' })
-  }, [cursor.col, grid.columns.length])
+    scrollToCursor(Math.floor(cursor.col / BEATS_PER_BAR), cursor.col % BEATS_PER_BAR)
+  }, [cursor.col, scrollToCursor])
 
   // Debounced autosave.
   React.useEffect(() => {
@@ -349,10 +347,34 @@ export function EditorPage() {
         setGrid((g) => toggleNoteEffect(g, cursor.col, cursor.string, noteEffectByKey[key]))
         return
       }
+      if (key === 'i') {
+        e.preventDefault()
+        commitDigitBuffer()
+        setGrid((g) => cycleSlideIn(g, cursor.col, cursor.string))
+        return
+      }
+      if (key === 'x') {
+        e.preventDefault()
+        commitDigitBuffer()
+        setGrid((g) => toggleDeadNote(g, cursor.col, cursor.string))
+        return
+      }
       if (key === 't') {
         e.preventDefault()
         commitDigitBuffer()
         setGrid((g) => toggleBeatEffect(g, cursor.col, 'tt'))
+        return
+      }
+      if (key === 'u') {
+        e.preventDefault()
+        commitDigitBuffer()
+        setGrid((g) => toggleBeatEffect(g, cursor.col, 'su'))
+        return
+      }
+      if (key === 'd') {
+        e.preventDefault()
+        commitDigitBuffer()
+        setGrid((g) => toggleBeatEffect(g, cursor.col, 'sd'))
       }
     }
 
@@ -414,7 +436,7 @@ export function EditorPage() {
       <div className="flex min-w-0 flex-col gap-4">
         <div
           ref={containerRef}
-          className="min-h-64 overflow-x-auto overflow-y-visible rounded-lg border border-border bg-white p-2"
+          className="h-[28rem] overflow-auto overscroll-contain rounded-lg border border-border bg-white p-2"
         />
 
         {alphaTabError && (
@@ -550,13 +572,57 @@ function cycleBend(grid: TabGrid, col: number, stringNo: number, kind: BendKind)
   return { columns }
 }
 
+/** Cycles a cell's open-ended slide marker: none -> slide in from below (`/14`)
+ * -> slide in from above (`\14`) -> none. Distinct from `sl`, which connects to
+ * an adjacent note instead of standing alone with no defined starting fret. */
+function cycleSlideIn(grid: TabGrid, col: number, stringNo: number): TabGrid {
+  if (col >= grid.columns.length) return grid
+  const column = grid.columns[col]
+  const cell = column.cells[stringNo]
+  if (!cell) return grid
+
+  const next: NoteEffect | null = cell.effects.includes('sib')
+    ? 'sia'
+    : cell.effects.includes('sia')
+      ? null
+      : 'sib'
+
+  const effects = cell.effects.filter((e): e is NoteEffect => e !== 'sib' && e !== 'sia')
+  if (next) effects.push(next)
+
+  const columns = grid.columns.slice()
+  columns[col] = { ...column, cells: { ...column.cells, [stringNo]: { ...cell, effects } } }
+  return { columns }
+}
+
+/** Toggles a cell between a fretted note and a dead/muted note (`x`). Creates
+ * an empty cell first if the cursor sits on a blank position, same as other
+ * note-effect toggles — except those require an existing note to attach to,
+ * while a dead note has no pitch and so needs nothing else. */
+function toggleDeadNote(grid: TabGrid, col: number, stringNo: number): TabGrid {
+  if (col >= grid.columns.length) return grid
+  const column = grid.columns[col]
+  const cell = column.cells[stringNo]
+  const columns = grid.columns.slice()
+  const next = cell ? { ...cell, dead: !cell.dead } : { fret: 0, effects: [], dead: true }
+  columns[col] = { ...column, cells: { ...column.cells, [stringNo]: next } }
+  return { columns }
+}
+
+/** A beat's pick stroke can only point one way, so enabling one clears the other. */
+const MUTUALLY_EXCLUSIVE_BEAT_EFFECTS: Partial<Record<BeatEffect, BeatEffect>> = {
+  su: 'sd',
+  sd: 'su',
+}
+
 function toggleBeatEffect(grid: TabGrid, col: number, effect: BeatEffect): TabGrid {
   if (col >= grid.columns.length) return grid
   const column = grid.columns[col]
   const has = column.beatEffects.includes(effect)
+  const opposite = MUTUALLY_EXCLUSIVE_BEAT_EFFECTS[effect]
   const beatEffects = has
     ? column.beatEffects.filter((e) => e !== effect)
-    : [...column.beatEffects, effect]
+    : [...column.beatEffects.filter((e) => e !== opposite), effect]
   const columns = grid.columns.slice()
   columns[col] = { ...column, beatEffects }
   return { columns }

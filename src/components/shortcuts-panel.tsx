@@ -14,6 +14,7 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
     title: 'Técnicas',
     items: [
       ['/ ou \\', 'Slide'],
+      ['I', 'Slide sem início definido (repita para alternar: entrar por baixo "/", por cima "\\")'],
       ['H', 'Hammer-on'],
       ['P', 'Pull-off'],
       ['B', 'Bend (repita para alternar o tamanho: 1/4, 1/2, 3/4, full, 1 1/2, 2x)'],
@@ -22,6 +23,9 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
       ['~', 'Vibrato'],
       ['K', 'Harmônico natural'],
       ['T', 'Tapping'],
+      ['X', 'Nota morta / abafada (ghost note)'],
+      ['U', 'Palhetada para cima'],
+      ['D', 'Palhetada para baixo'],
     ],
   },
 ]

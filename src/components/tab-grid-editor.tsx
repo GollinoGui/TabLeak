@@ -8,6 +8,8 @@ const EFFECT_LABEL: Record<string, string> = {
   h: 'h',
   p: 'p',
   sl: '/',
+  sib: '/',
+  sia: '\\',
   pm: 'PM',
   v: '~',
   nh: 'nh',
@@ -41,9 +43,31 @@ export function TabGridEditor({
   }, [cursor.col, cursor.string])
 
   return (
-    <div className="overflow-x-auto rounded-lg border border-border bg-card">
+    <div className="overflow-x-auto overscroll-x-contain rounded-lg border border-border bg-card">
       <table className="border-collapse text-sm">
         <tbody>
+          <tr>
+            <td className="sticky left-0 z-10 w-10 shrink-0 border-r border-border bg-card" />
+            {grid.columns.map((column, colIndex) => {
+              const barStart = colIndex % 4 === 0 && colIndex > 0
+              const stroke = column.beatEffects.includes('su')
+                ? '↑'
+                : column.beatEffects.includes('sd')
+                  ? '↓'
+                  : ''
+              return (
+                <td
+                  key={colIndex}
+                  className={cn(
+                    'h-4 w-10 px-0 py-0 text-center align-middle text-xs leading-none font-bold text-primary',
+                    barStart && 'border-l-2 border-l-border',
+                  )}
+                >
+                  {stroke}
+                </td>
+              )
+            })}
+          </tr>
           {stringsHighToLow.map((openNote, idx) => {
             const stringNo = idx + 1
             return (
@@ -61,27 +85,31 @@ export function TabGridEditor({
                       ref={isCursor ? cursorCellRef : undefined}
                       onClick={() => onSelectCell?.(colIndex, stringNo)}
                       className={cn(
-                        'h-10 w-10 cursor-pointer px-0 py-0 text-center align-middle font-mono border-b border-border',
+                        'h-10 w-10 min-h-10 cursor-pointer px-0 py-0.5 text-center align-middle font-mono border-b border-border',
                         barStart && 'border-l-2 border-l-border',
                       )}
                     >
                       <div
                         className={cn(
-                          'mx-0.5 flex h-8 w-9 flex-col items-center justify-center rounded',
+                          'mx-0.5 flex min-h-8 w-9 flex-col items-center justify-center gap-0.5 rounded',
                           isCursor && 'bg-primary/20 ring-2 ring-primary',
                         )}
                       >
                         <span className={cn(cell ? 'text-foreground' : 'text-muted-foreground/40')}>
                           {isCursor && digitBuffer
                             ? digitBuffer
-                            : (cell?.fret ?? (isCursor ? '' : '·'))}
+                            : cell?.dead
+                              ? 'X'
+                              : (cell?.fret ?? (isCursor ? '' : '·'))}
                         </span>
-                        {cell && (cell.effects.length > 0 || cell.bend) && (
+                        {cell && cell.effects.length > 0 && (
                           <span className="text-[9px] leading-none text-primary">
-                            {[
-                              ...cell.effects.map((e) => EFFECT_LABEL[e] ?? e),
-                              ...(cell.bend ? [bendLabel(cell.bend)] : []),
-                            ].join(' ')}
+                            {cell.effects.map((e) => EFFECT_LABEL[e] ?? e).join(' ')}
+                          </span>
+                        )}
+                        {cell?.bend && (
+                          <span className="text-[9px] leading-none text-primary">
+                            {bendLabel(cell.bend)}
                           </span>
                         )}
                       </div>
