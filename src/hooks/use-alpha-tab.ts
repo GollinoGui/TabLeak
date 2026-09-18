@@ -73,6 +73,15 @@ export function useAlphaTab(
         // adjacent notes (e.g. a bend's value label and a following
         // slide/hammer-on/pull-off curve) don't run into each other.
         stretchForce: 1.3,
+        resources: {
+          // The tuning label (e.g. "Standard Tuning") alphaTab draws above
+          // the staff defaults to a small, thin font that's easy to miss —
+          // bump it up so it reads as a real piece of information, not a footnote.
+          // A CSS font shorthand string is accepted here (see `FontJson` in
+          // alphaTab's types) — no need to import alphaTab's `Font` class,
+          // which isn't actually exported from the package's runtime bundle.
+          elementFonts: new Map([[NotationElement.GuitarTuning, 'bold 16px Arial, sans-serif']]),
+        },
       },
       notation: {
         // The tempo/dynamics markings alphaTab shows by default duplicate the

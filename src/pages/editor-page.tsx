@@ -11,6 +11,7 @@ import { Input } from '@/components/ui/input'
 import { useAlphaTab } from '@/hooks/use-alpha-tab'
 import {
   BEND_STEPS,
+  DEFAULT_BEATS_PER_BAR,
   DEFAULT_SOUND,
   type BeatEffect,
   type BendData,
@@ -25,7 +26,6 @@ import {
 import { fretForNote, normalizeNoteName } from '@/lib/note-utils'
 import { useLibrary } from '@/store/library-store'
 
-const BEATS_PER_BAR = 4
 const DIGIT_COMMIT_MS = 550
 const AUTOSAVE_MS = 1500
 const SAVED_FEEDBACK_MS = 1500
@@ -34,6 +34,8 @@ const MIN_BPM = 30
 const MAX_BPM = 300
 const BPM_STEP = 5
 const LAYOUT_MODE_STORAGE_KEY = 'tableak.layoutMode'
+const SHOW_SCORE_STORAGE_KEY = 'tableak.showScore'
+const SHOW_NOTE_NAMES_STORAGE_KEY = 'tableak.showNoteNames'
 
 /** Notation layout is a display preference, not tab content — kept in
  * localStorage (shared across tabs) instead of the saved tab data. */
@@ -44,10 +46,27 @@ function getInitialLayoutMode(): LayoutMode {
     : LayoutMode.Horizontal
 }
 
+/** Whether to render the standard notation staff alongside the tab, and
+ * whether to show each fretted note's letter name in the grid — both display
+ * preferences, not tab content, same reasoning as the layout mode above. */
+function getInitialBooleanPref(key: string, defaultValue: boolean): boolean {
+  if (typeof window === 'undefined') return defaultValue
+  const stored = window.localStorage.getItem(key)
+  if (stored === null) return defaultValue
+  return stored === 'true'
+}
+
 export function EditorPage() {
   const { tabId } = useParams<{ tabId: string }>()
-  const { getTab, updateTabContent, updateTabBpm, updateTabSound, renameTab, maxBarsPerTab } =
-    useLibrary()
+  const {
+    getTab,
+    updateTabContent,
+    updateTabBpm,
+    updateTabSound,
+    updateTabBeatsPerBar,
+    renameTab,
+    maxBarsPerTab,
+  } = useLibrary()
   const tab = tabId ? getTab(tabId) : undefined
 
   const containerRef = React.useRef<HTMLDivElement>(null)
@@ -65,6 +84,13 @@ export function EditorPage() {
   const [grid, setGrid] = React.useState<TabGrid>(() => deserializeGrid(tab?.content ?? null))
   const [bpm, setBpm] = React.useState(tab?.bpm ?? 120)
   const [sound, setSound] = React.useState(tab?.sound ?? DEFAULT_SOUND)
+  const [beatsPerBar, setBeatsPerBar] = React.useState(tab?.beatsPerBar ?? DEFAULT_BEATS_PER_BAR)
+  const [showScore, setShowScore] = React.useState(() =>
+    getInitialBooleanPref(SHOW_SCORE_STORAGE_KEY, true),
+  )
+  const [showNoteNames, setShowNoteNames] = React.useState(() =>
+    getInitialBooleanPref(SHOW_NOTE_NAMES_STORAGE_KEY, true),
+  )
   const [cursor, setCursor] = React.useState({ col: 0, string: 1 })
   const [digitBuffer, setDigitBuffer] = React.useState('')
   const [noteNameMode, setNoteNameMode] = React.useState(false)
@@ -79,21 +105,24 @@ export function EditorPage() {
   const pendingNoteTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const stringCount = tab?.instrumentConfig.strings ?? 6
-  const bars = barCount(grid)
+  const bars = barCount(grid, beatsPerBar)
   const atBarLimit = bars >= maxBarsPerTab
 
-  // Regenerate the AlphaTab render whenever the underlying grid or tempo changes.
+  // Regenerate the AlphaTab render whenever the underlying grid, tempo, time
+  // signature, or notation display preferences change.
   React.useEffect(() => {
     if (!tab) return
-    setTex(gridToAlphaTex(tab.name, tab.instrumentConfig, grid, bpm, sound))
-  }, [grid, bpm, sound, tab, setTex])
+    setTex(
+      gridToAlphaTex(tab.name, tab.instrumentConfig, grid, bpm, sound, beatsPerBar, showScore),
+    )
+  }, [grid, bpm, sound, beatsPerBar, showScore, tab, setTex])
 
   // Keep the notation preview scrolled to where the cursor currently is —
   // reapplied by the hook after every render too, so editing far into the
   // tab while scrolled elsewhere in the preview still brings it into view.
   React.useEffect(() => {
-    scrollToCursor(Math.floor(cursor.col / BEATS_PER_BAR), cursor.col % BEATS_PER_BAR)
-  }, [cursor.col, scrollToCursor])
+    scrollToCursor(Math.floor(cursor.col / beatsPerBar), cursor.col % beatsPerBar)
+  }, [cursor.col, beatsPerBar, scrollToCursor])
 
   // Debounced autosave.
   React.useEffect(() => {
@@ -103,12 +132,15 @@ export function EditorPage() {
       updateTabContent(tab.id, serializeGrid(grid))
       if (bpm !== tab.bpm) updateTabBpm(tab.id, bpm)
       if (sound !== (tab.sound ?? DEFAULT_SOUND)) updateTabSound(tab.id, sound)
+      if (beatsPerBar !== (tab.beatsPerBar ?? DEFAULT_BEATS_PER_BAR)) {
+        updateTabBeatsPerBar(tab.id, beatsPerBar)
+      }
     }, AUTOSAVE_MS)
     return () => {
       if (autosaveTimeoutRef.current) clearTimeout(autosaveTimeoutRef.current)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [grid, bpm, sound, tab?.id])
+  }, [grid, bpm, sound, beatsPerBar, tab?.id])
 
   React.useEffect(() => {
     return () => {
@@ -136,14 +168,14 @@ export function EditorPage() {
     (col: number) => {
       setGrid((g) => {
         if (col < g.columns.length) return g
-        const barsNeeded = Math.ceil((col + 1) / BEATS_PER_BAR)
+        const barsNeeded = Math.ceil((col + 1) / beatsPerBar)
         if (barsNeeded > maxBarsPerTab) return g
-        const extra = barsNeeded * BEATS_PER_BAR - g.columns.length
+        const extra = barsNeeded * beatsPerBar - g.columns.length
         if (extra <= 0) return g
         return { columns: [...g.columns, ...Array.from({ length: extra }, emptyColumnLocal)] }
       })
     },
-    [maxBarsPerTab],
+    [maxBarsPerTab, beatsPerBar],
   )
 
   const moveCursor = React.useCallback(
@@ -152,12 +184,12 @@ export function EditorPage() {
       if (delta > 0) {
         const next = cursor.col + delta
         ensureColumn(next)
-        setCursor((c) => ({ ...c, col: Math.min(next, maxBarsPerTab * BEATS_PER_BAR - 1) }))
+        setCursor((c) => ({ ...c, col: Math.min(next, maxBarsPerTab * beatsPerBar - 1) }))
       } else {
         setCursor((c) => ({ ...c, col: Math.max(0, c.col + delta) }))
       }
     },
-    [cursor.col, commitDigitBuffer, ensureColumn, maxBarsPerTab],
+    [cursor.col, commitDigitBuffer, ensureColumn, maxBarsPerTab, beatsPerBar],
   )
 
   const handleSelectCell = React.useCallback(
@@ -175,9 +207,9 @@ export function EditorPage() {
       setPickerSelection({ string: stringNo, fret })
       const next = cursor.col + 1
       ensureColumn(next)
-      setCursor(() => ({ col: Math.min(next, maxBarsPerTab * BEATS_PER_BAR - 1), string: stringNo }))
+      setCursor(() => ({ col: Math.min(next, maxBarsPerTab * beatsPerBar - 1), string: stringNo }))
     },
-    [cursor.col, ensureColumn, maxBarsPerTab],
+    [cursor.col, ensureColumn, maxBarsPerTab, beatsPerBar],
   )
 
   const toggleFretboard = React.useCallback(() => {
@@ -195,10 +227,24 @@ export function EditorPage() {
     updateTabContent(tab.id, serializeGrid(grid))
     if (bpm !== tab.bpm) updateTabBpm(tab.id, bpm)
     if (sound !== (tab.sound ?? DEFAULT_SOUND)) updateTabSound(tab.id, sound)
+    if (beatsPerBar !== (tab.beatsPerBar ?? DEFAULT_BEATS_PER_BAR)) {
+      updateTabBeatsPerBar(tab.id, beatsPerBar)
+    }
     setJustSaved(true)
     if (savedFeedbackTimeoutRef.current) clearTimeout(savedFeedbackTimeoutRef.current)
     savedFeedbackTimeoutRef.current = setTimeout(() => setJustSaved(false), SAVED_FEEDBACK_MS)
-  }, [tab, grid, bpm, sound, commitDigitBuffer, updateTabContent, updateTabBpm, updateTabSound])
+  }, [
+    tab,
+    grid,
+    bpm,
+    sound,
+    beatsPerBar,
+    commitDigitBuffer,
+    updateTabContent,
+    updateTabBpm,
+    updateTabSound,
+    updateTabBeatsPerBar,
+  ])
 
   const handleToggleLayoutMode = React.useCallback(() => {
     setLayoutModeState((mode) => {
@@ -214,6 +260,26 @@ export function EditorPage() {
 
   const handleBpmChange = React.useCallback((next: number) => {
     setBpm(Math.min(MAX_BPM, Math.max(MIN_BPM, next)))
+  }, [])
+
+  const handleBeatsPerBarChange = React.useCallback((next: number) => {
+    setBeatsPerBar(next)
+  }, [])
+
+  const handleToggleShowScore = React.useCallback(() => {
+    setShowScore((v) => {
+      const next = !v
+      window.localStorage.setItem(SHOW_SCORE_STORAGE_KEY, String(next))
+      return next
+    })
+  }, [])
+
+  const handleToggleShowNoteNames = React.useCallback(() => {
+    setShowNoteNames((v) => {
+      const next = !v
+      window.localStorage.setItem(SHOW_NOTE_NAMES_STORAGE_KEY, String(next))
+      return next
+    })
   }, [])
 
   const handleRestart = React.useCallback(() => {
@@ -368,6 +434,13 @@ export function EditorPage() {
         return
       }
 
+      if (key === 'k') {
+        e.preventDefault()
+        commitDigitBuffer()
+        setGrid((g) => toggleNoteEffect(g, cursor.col, cursor.string, e.shiftKey ? 'ph' : 'nh'))
+        return
+      }
+
       const noteEffectByKey: Record<string, NoteEffect> = {
         h: 'h',
         p: 'p',
@@ -375,7 +448,6 @@ export function EditorPage() {
         '\\': 'sl',
         m: 'pm',
         '~': 'v',
-        k: 'nh',
         l: 'lr',
       }
       if (key in noteEffectByKey) {
@@ -446,7 +518,7 @@ export function EditorPage() {
   }
 
   return (
-    <div className="mx-auto flex min-h-svh w-full max-w-6xl flex-col gap-6 px-4 py-6 pb-28 sm:px-8">
+    <div className="mx-auto flex min-h-svh w-full max-w-[100rem] flex-col gap-6 px-4 py-6 pb-28 sm:px-8">
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           <Button variant="ghost" size="icon" asChild>
@@ -471,9 +543,14 @@ export function EditorPage() {
       </header>
 
       <div className="flex min-w-0 flex-col gap-4">
+        <p className="text-sm font-semibold text-foreground">
+          <span className="text-muted-foreground">Afinação: </span>
+          {[...tab.instrumentConfig.tuning].reverse().join(' ')}
+        </p>
+
         <div
           ref={containerRef}
-          className="h-[28rem] overflow-auto overscroll-contain rounded-lg border border-border bg-white p-2"
+          className="h-[34rem] overflow-auto overscroll-contain rounded-lg border border-border bg-white p-2"
         />
 
         {alphaTabError && (
@@ -488,6 +565,8 @@ export function EditorPage() {
           cursor={cursor}
           digitBuffer={digitBuffer}
           onSelectCell={handleSelectCell}
+          beatsPerBar={beatsPerBar}
+          showNoteNames={showNoteNames}
         />
 
         {atBarLimit && (
@@ -531,6 +610,12 @@ export function EditorPage() {
         onToggleLayoutMode={handleToggleLayoutMode}
         sound={sound}
         onSoundChange={setSound}
+        beatsPerBar={beatsPerBar}
+        onBeatsPerBarChange={handleBeatsPerBarChange}
+        showScore={showScore}
+        onToggleShowScore={handleToggleShowScore}
+        showNoteNames={showNoteNames}
+        onToggleShowNoteNames={handleToggleShowNoteNames}
       />
     </div>
   )
@@ -563,11 +648,14 @@ function clearCell(grid: TabGrid, col: number, stringNo: number): TabGrid {
   return { columns }
 }
 
-/** Hammer-on and pull-off describe the same slur in opposite directions —
- * a note can't be both, so enabling one clears the other. */
+/** Hammer-on and pull-off describe the same slur in opposite directions, and
+ * natural/pinch harmonics are two different ways to pluck the same note —
+ * a note can't be both of either pair, so enabling one clears its opposite. */
 const MUTUALLY_EXCLUSIVE_EFFECTS: Partial<Record<NoteEffect, NoteEffect>> = {
   h: 'p',
   p: 'h',
+  nh: 'ph',
+  ph: 'nh',
 }
 
 function toggleNoteEffect(

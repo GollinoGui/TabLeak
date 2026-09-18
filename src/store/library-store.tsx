@@ -67,6 +67,7 @@ interface LibraryContextValue {
   updateTabContent: (id: string, content: string) => void
   updateTabBpm: (id: string, bpm: number) => void
   updateTabSound: (id: string, sound: number) => void
+  updateTabBeatsPerBar: (id: string, beatsPerBar: number) => void
   renameTab: (id: string, name: string) => void
   getTab: (id: string) => Tab | undefined
 }
@@ -142,6 +143,7 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
         content: null,
         bpm: 120,
         sound: DEFAULT_SOUND,
+        beatsPerBar: 4,
         isDeleted: false,
         deletedAt: null,
         createdAt: now,
@@ -196,6 +198,15 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
     }))
   }, [])
 
+  const updateTabBeatsPerBar = React.useCallback((id: string, beatsPerBar: number) => {
+    setState((s) => ({
+      ...s,
+      tabs: s.tabs.map((t) =>
+        t.id === id ? { ...t, beatsPerBar, updatedAt: new Date().toISOString() } : t,
+      ),
+    }))
+  }, [])
+
   const renameTab = React.useCallback((id: string, name: string) => {
     setState((s) => ({
       ...s,
@@ -231,6 +242,7 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
     updateTabContent,
     updateTabBpm,
     updateTabSound,
+    updateTabBeatsPerBar,
     renameTab,
     getTab,
   }

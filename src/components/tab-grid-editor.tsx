@@ -1,7 +1,8 @@
 import * as React from 'react'
 
 import { cn } from '@/lib/utils'
-import { BEND_LABELS, type BendData, type TabGrid } from '@/lib/tab-grid'
+import { BEND_LABELS, DEFAULT_BEATS_PER_BAR, type BendData, type TabGrid } from '@/lib/tab-grid'
+import { noteNameAtFret } from '@/lib/note-utils'
 import type { InstrumentConfig } from '@/types'
 
 const EFFECT_LABEL: Record<string, string> = {
@@ -13,6 +14,7 @@ const EFFECT_LABEL: Record<string, string> = {
   pm: 'PM',
   v: '~',
   nh: 'nh',
+  ph: 'PH',
   lr: 'LR',
 }
 
@@ -21,12 +23,32 @@ function bendLabel(bend: BendData): string {
   return bend.kind === 'prebend' ? `PB ${size} ↓` : `b ${size} ↑`
 }
 
+/** alphaTab has no separate alphaTex tag for pull-off — `h` and `p` both
+ * compile to the same `{h}` tag, and alphaTab renders whichever letter
+ * actually matches the pitch change to the *next* note on the same string
+ * (fret comparison on the tab staff), ignoring which of the two the player
+ * chose. Mirroring that comparison here (rather than trusting the stored
+ * 'h'/'p') keeps this grid's label from silently lying about what the
+ * notation preview will actually show — e.g. a note marked "pull-off" whose
+ * next note on the string is actually higher renders as a hammer-on. */
+function hammerPullLabel(grid: TabGrid, colIndex: number, stringNo: number, fret: number): string | null {
+  for (let i = colIndex + 1; i < grid.columns.length; i++) {
+    const destCell = grid.columns[i].cells[stringNo]
+    if (destCell && !destCell.dead) return destCell.fret >= fret ? 'h' : 'p'
+  }
+  // No later note on this string for alphaTab to slur into — it silently
+  // drops the effect in this case, so no label should render either.
+  return null
+}
+
 interface TabGridEditorProps {
   grid: TabGrid
   instrument: InstrumentConfig
   cursor: { col: number; string: number }
   digitBuffer: string
   onSelectCell?: (col: number, stringNo: number) => void
+  beatsPerBar?: number
+  showNoteNames?: boolean
 }
 
 export function TabGridEditor({
@@ -35,6 +57,8 @@ export function TabGridEditor({
   cursor,
   digitBuffer,
   onSelectCell,
+  beatsPerBar = DEFAULT_BEATS_PER_BAR,
+  showNoteNames = false,
 }: TabGridEditorProps) {
   const stringsHighToLow = [...instrument.tuning].reverse()
   const cursorCellRef = React.useRef<HTMLTableCellElement>(null)
@@ -50,7 +74,7 @@ export function TabGridEditor({
           <tr>
             <td className="sticky left-0 z-10 w-10 shrink-0 border-r border-border bg-card" />
             {grid.columns.map((column, colIndex) => {
-              const barStart = colIndex % 4 === 0 && colIndex > 0
+              const barStart = colIndex % beatsPerBar === 0 && colIndex > 0
               const stroke = column.beatEffects.includes('su')
                 ? '↑'
                 : column.beatEffects.includes('sd')
@@ -79,7 +103,7 @@ export function TabGridEditor({
                 {grid.columns.map((column, colIndex) => {
                   const isCursor = cursor.col === colIndex && cursor.string === stringNo
                   const cell = column.cells[stringNo]
-                  const barStart = colIndex % 4 === 0 && colIndex > 0
+                  const barStart = colIndex % beatsPerBar === 0 && colIndex > 0
                   return (
                     <td
                       key={colIndex}
@@ -103,14 +127,32 @@ export function TabGridEditor({
                               ? 'X'
                               : (cell?.fret ?? (isCursor ? '' : '·'))}
                         </span>
-                        {cell && cell.effects.length > 0 && (
-                          <span className="text-[9px] leading-none text-primary">
-                            {cell.effects.map((e) => EFFECT_LABEL[e] ?? e).join(' ')}
-                          </span>
-                        )}
+                        {cell && cell.effects.length > 0 && (() => {
+                          const labels = cell.effects
+                            .map((e) => {
+                              if (e === 'h' || e === 'p') {
+                                const real = hammerPullLabel(grid, colIndex, stringNo, cell.fret)
+                                return real ? EFFECT_LABEL[real] : null
+                              }
+                              return EFFECT_LABEL[e] ?? e
+                            })
+                            .filter((label): label is string => label !== null)
+                          return (
+                            labels.length > 0 && (
+                              <span className="text-[9px] leading-none text-primary">
+                                {labels.join(' ')}
+                              </span>
+                            )
+                          )
+                        })()}
                         {cell?.bend && (
                           <span className="text-[9px] leading-none text-primary">
                             {bendLabel(cell.bend)}
+                          </span>
+                        )}
+                        {showNoteNames && cell && !cell.dead && (
+                          <span className="text-[9px] leading-none text-muted-foreground">
+                            {noteNameAtFret(openNote, cell.fret)}
                           </span>
                         )}
                       </div>

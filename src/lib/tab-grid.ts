@@ -11,7 +11,7 @@ import type { InstrumentConfig } from '@/types'
  * pitch on the same string, so it keeps ringing instead of being cut off —
  * mark both the starting note and the note it rings into. See `effectToTex`
  * for why this compiles to a tie rather than alphaTex's own `lr` tag. */
-export type NoteEffect = 'h' | 'p' | 'sl' | 'sib' | 'sia' | 'pm' | 'v' | 'nh' | 'lr'
+export type NoteEffect = 'h' | 'p' | 'sl' | 'sib' | 'sia' | 'pm' | 'v' | 'nh' | 'ph' | 'lr'
 
 /** Beat-level alphaTex property tags. `su`/`sd` mark the pick-stroke direction
  * (up/down) shown above the beat; they're mutually exclusive with each other. */
@@ -76,18 +76,25 @@ export interface TabGrid {
   columns: Column[]
 }
 
-const BEATS_PER_BAR = 4
+export const DEFAULT_BEATS_PER_BAR = 4
 
-export function createEmptyGrid(bars = 4): TabGrid {
-  return { columns: Array.from({ length: bars * BEATS_PER_BAR }, () => emptyColumn()) }
+/** Selectable time signatures. Denominator is fixed at a quarter note — the
+ * grid's columns are always one quarter note each (see the global `:4` in
+ * `gridToAlphaTex`), so only the numerator (beats per bar) is configurable.
+ * Signatures like 6/8 would need a different note-duration unit for the
+ * whole grid, which is out of scope for now. */
+export const BEATS_PER_BAR_OPTIONS = [2, 3, 4, 5, 6] as const
+
+export function createEmptyGrid(bars = 4, beatsPerBar = DEFAULT_BEATS_PER_BAR): TabGrid {
+  return { columns: Array.from({ length: bars * beatsPerBar }, () => emptyColumn()) }
 }
 
 export function emptyColumn(): Column {
   return { cells: {}, beatEffects: [] }
 }
 
-export function barCount(grid: TabGrid): number {
-  return Math.ceil(grid.columns.length / BEATS_PER_BAR) || 1
+export function barCount(grid: TabGrid, beatsPerBar = DEFAULT_BEATS_PER_BAR): number {
+  return Math.ceil(grid.columns.length / beatsPerBar) || 1
 }
 
 function escapeTexString(value: string): string {
@@ -144,12 +151,22 @@ function columnToTex(column: Column): string {
   return body + beatEffects
 }
 
+/** Bass-range instruments (4/5 strings, e.g. standard bass tunings) read in
+ * bass (F4) clef on the standard notation staff; everything else (6+ string
+ * guitars) reads in treble (G2) clef. There's no explicit "is this a bass"
+ * flag on `InstrumentConfig`, so string count is the closest available proxy. */
+function clefFor(instrument: InstrumentConfig): string {
+  return instrument.strings <= 5 ? 'F4' : 'G2'
+}
+
 export function gridToAlphaTex(
   tabName: string,
   instrument: InstrumentConfig,
   grid: TabGrid,
   bpm = 120,
   sound = DEFAULT_SOUND,
+  beatsPerBar = DEFAULT_BEATS_PER_BAR,
+  showScore = false,
 ): string {
   const tuning = tuningToAlphaTex(instrument.tuning)
   const header = [
@@ -157,18 +174,24 @@ export function gridToAlphaTex(
     `\\tempo ${bpm}`,
     `\\track "${escapeTexString(tabName)}"`,
     `\\instrument ${sound}`,
-    '\\staff{tabs}',
+    showScore ? '\\staff{score tabs}' : '\\staff{tabs}',
     `\\tuning (${tuning})`,
   ].join('\n')
 
   const bars: string[] = []
-  for (let i = 0; i < grid.columns.length; i += BEATS_PER_BAR) {
-    const barColumns = grid.columns.slice(i, i + BEATS_PER_BAR)
+  for (let i = 0; i < grid.columns.length; i += beatsPerBar) {
+    const barColumns = grid.columns.slice(i, i + beatsPerBar)
     bars.push(barColumns.map(columnToTex).join(' '))
   }
-  if (bars.length === 0) bars.push('r r r r')
+  if (bars.length === 0) bars.push(Array.from({ length: beatsPerBar }, () => 'r').join(' '))
 
-  return `${header}\n\n:4 ${bars.join(' | ')} |`
+  // Clef/time signature meta only needs to appear once, at the very start —
+  // it stays in effect for the rest of the piece until changed again. They
+  // must come before the `:4` global default-duration shorthand — alphaTex's
+  // parser rejects a meta tag once it's inside note-content mode.
+  const meta = `\\clef ${clefFor(instrument)} \\ts (${beatsPerBar} 4)`
+
+  return `${header}\n\n${meta} :4 ${bars.join(' | ')} |`
 }
 
 export function serializeGrid(grid: TabGrid): string {

@@ -40,6 +40,10 @@ export interface Tab {
    * because tabs saved before this feature existed don't have it — callers
    * fall back to a default. */
   sound?: number
+  /** Beats per bar (time signature numerator, denominator fixed at 4). Optional
+   * because tabs saved before this feature existed don't have it — callers
+   * fall back to 4. */
+  beatsPerBar?: number
   isDeleted: boolean
   deletedAt: string | null
   createdAt: string

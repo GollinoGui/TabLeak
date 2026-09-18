@@ -23,6 +23,7 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
       ['~', 'Vibrato'],
       ['L', 'Let ring'],
       ['K', 'Harmônico natural'],
+      ['Shift+K', 'Harmônico pinçado'],
       ['T', 'Tapping'],
       ['X', 'Nota morta'],
       ['U', 'Palhetada p/ cima'],

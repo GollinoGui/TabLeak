@@ -12,6 +12,7 @@ import {
   Plus,
   RotateCcw,
   Save,
+  Settings2,
   StretchHorizontal,
   WrapText,
 } from 'lucide-react'
@@ -19,8 +20,16 @@ import {
 import { ShortcutsPanel } from '@/components/shortcuts-panel'
 import { ThemeToggle } from '@/components/theme-toggle'
 import { Button } from '@/components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { SOUND_OPTIONS } from '@/lib/tab-grid'
+import { BEATS_PER_BAR_OPTIONS, SOUND_OPTIONS } from '@/lib/tab-grid'
 import { cn } from '@/lib/utils'
 
 interface TabBottomToolbarProps {
@@ -42,6 +51,12 @@ interface TabBottomToolbarProps {
   onToggleLayoutMode: () => void
   sound: number
   onSoundChange: (sound: number) => void
+  beatsPerBar: number
+  onBeatsPerBarChange: (beatsPerBar: number) => void
+  showScore: boolean
+  onToggleShowScore: () => void
+  showNoteNames: boolean
+  onToggleShowNoteNames: () => void
 }
 
 export function TabBottomToolbar({
@@ -63,6 +78,12 @@ export function TabBottomToolbar({
   onToggleLayoutMode,
   sound,
   onSoundChange,
+  beatsPerBar,
+  onBeatsPerBarChange,
+  showScore,
+  onToggleShowScore,
+  showNoteNames,
+  onToggleShowNoteNames,
 }: TabBottomToolbarProps) {
   const isHorizontal = layoutMode === LayoutMode.Horizontal
   return (
@@ -121,6 +142,23 @@ export function TabBottomToolbar({
           </Button>
         </div>
 
+        <Select value={String(beatsPerBar)} onValueChange={(v) => onBeatsPerBarChange(Number(v))}>
+          <SelectTrigger
+            className="h-9 w-16 justify-center rounded-full border-none px-2 shadow-none"
+            aria-label="Fórmula de compasso"
+            title="Fórmula de compasso"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent align="center">
+            {BEATS_PER_BAR_OPTIONS.map((n) => (
+              <SelectItem key={n} value={String(n)}>
+                {n}/4
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
         <Button
           variant={fretboardOpen ? 'secondary' : 'ghost'}
           size="icon"
@@ -146,6 +184,33 @@ export function TabBottomToolbar({
         >
           {isHorizontal ? <StretchHorizontal /> : <WrapText />}
         </Button>
+
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="rounded-full"
+              aria-label="Opções de visualização"
+              title="Opções de visualização"
+            >
+              <Settings2 />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="center" side="top">
+            <DropdownMenuLabel>Visualização</DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            <DropdownMenuCheckboxItem checked={showScore} onCheckedChange={onToggleShowScore}>
+              Mostrar partitura
+            </DropdownMenuCheckboxItem>
+            <DropdownMenuCheckboxItem
+              checked={showNoteNames}
+              onCheckedChange={onToggleShowNoteNames}
+            >
+              Mostrar nome das notas
+            </DropdownMenuCheckboxItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
 
         <Select value={String(sound)} onValueChange={(v) => onSoundChange(Number(v))}>
           <SelectTrigger
