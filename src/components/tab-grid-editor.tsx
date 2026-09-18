@@ -1,7 +1,15 @@
 import * as React from 'react'
 
 import { cn } from '@/lib/utils'
-import { BEND_LABELS, DEFAULT_BEATS_PER_BAR, type BendData, type TabGrid } from '@/lib/tab-grid'
+import {
+  BEND_LABELS,
+  DEFAULT_BEATS_PER_BAR,
+  computeColumnPositions,
+  tupletValidityFlags,
+  type BendData,
+  type Column,
+  type TabGrid,
+} from '@/lib/tab-grid'
 import { noteNameAtFret } from '@/lib/note-utils'
 import type { InstrumentConfig } from '@/types'
 
@@ -32,6 +40,23 @@ function bendLabel(bend: BendData): string {
   return bend.kind === 'prebend' ? `PB ${size} ↓` : `b ${size} ↑`
 }
 
+/** Small per-column marking for a duration that isn't a plain quarter note —
+ * shown in the header row next to the existing pick-stroke glyph. The
+ * grid itself doesn't draw beams/tuplet brackets (alphaTab's own rendered
+ * notation above it already does that automatically once real durations are
+ * emitted) — this is just enough for the user to tell at a glance what's on
+ * a column while editing. */
+const TUPLET_SUPERSCRIPT: Record<3 | 6, string> = { 3: '³', 6: '⁶' }
+
+function durationBadge(column: Column): string {
+  const parts: string[] = []
+  if (column.duration === 8) parts.push('8')
+  else if (column.duration === 16) parts.push('16')
+  if (column.tuplet) parts.push(TUPLET_SUPERSCRIPT[column.tuplet])
+  if (column.dotted) parts.push('.')
+  return parts.join('')
+}
+
 /** alphaTab has no separate alphaTex tag for pull-off — `h` and `p` both
  * compile to the same `{h}` tag, and alphaTab renders whichever letter
  * actually matches the pitch change to the *next* note on the same string
@@ -55,6 +80,16 @@ export interface GridSelection {
   end: number
 }
 
+/** In-progress click-hold-drag of a single note (as opposed to a whole-column
+ * `GridSelection`) — from the cell it was picked up from to the cell it
+ * would land on if released now. */
+export interface NoteDragPreview {
+  sourceCol: number
+  sourceString: number
+  targetCol: number
+  targetString: number
+}
+
 interface TabGridEditorProps {
   grid: TabGrid
   instrument: InstrumentConfig
@@ -70,8 +105,14 @@ interface TabGridEditorProps {
   /** Column range selected by click-hold-drag, if any — shaded across every
    * string, independent of the single-cell `cursor`. */
   selection?: GridSelection | null
-  onCellMouseDown?: (col: number) => void
-  onCellMouseEnter?: (col: number) => void
+  /** Single note currently being picked up and dragged to a new cell, if any
+   * — shows just the source and target squares instead of `selection`'s
+   * full-column shading. */
+  noteDrag?: NoteDragPreview | null
+  /** `stringNo` is 0 for the header (stroke) row, which isn't tied to any
+   * string. */
+  onCellMouseDown?: (col: number, stringNo: number) => void
+  onCellMouseEnter?: (col: number, stringNo: number) => void
   onCellMouseUp?: () => void
   /** Attached to the horizontally-scrolling wrapper so the selection pill
    * (rendered by the parent, outside this memoized component) can anchor
@@ -95,13 +136,24 @@ export const TabGridEditor = React.memo(function TabGridEditor({
   showNoteNames = false,
   activeColumn = null,
   selection = null,
+  noteDrag = null,
   onCellMouseDown,
   onCellMouseEnter,
   onCellMouseUp,
   scrollContainerRef,
 }: TabGridEditorProps) {
-  const activeBarStart =
-    activeColumn != null ? Math.floor(activeColumn / beatsPerBar) * beatsPerBar : null
+  // Columns can now carry different durations, so a bar's column span isn't
+  // a fixed stride anymore — this is the one place that math happens,
+  // shared by both the header row and every string row below.
+  const positions = React.useMemo(
+    () => computeColumnPositions(grid.columns, beatsPerBar).positions,
+    [grid.columns, beatsPerBar],
+  )
+  const tupletValidity = React.useMemo(
+    () => tupletValidityFlags(grid.columns, positions),
+    [grid.columns, positions],
+  )
+  const activeBarIndex = activeColumn != null ? positions[activeColumn]?.barIndex ?? null : null
   const stringsHighToLow = [...instrument.tuning].reverse()
   const cursorCellRef = React.useRef<HTMLTableCellElement>(null)
 
@@ -119,17 +171,15 @@ export const TabGridEditor = React.memo(function TabGridEditor({
           <tr>
             <td className="sticky left-0 z-10 w-10 shrink-0 border-r border-border bg-card" />
             {grid.columns.map((column, colIndex) => {
-              const barStart = colIndex % beatsPerBar === 0 && colIndex > 0
-              const inActiveBar =
-                activeBarStart !== null &&
-                colIndex >= activeBarStart &&
-                colIndex < activeBarStart + beatsPerBar
+              const barStart = positions[colIndex]?.isBarStart && colIndex > 0
+              const inActiveBar = activeBarIndex !== null && positions[colIndex]?.barIndex === activeBarIndex
               const inSelection = selection !== null && colIndex >= selection.start && colIndex <= selection.end
               const stroke = column.beatEffects.includes('su')
                 ? '↑'
                 : column.beatEffects.includes('sd')
                   ? '↓'
                   : ''
+              const badge = durationBadge(column)
               return (
                 <td
                   key={colIndex}
@@ -142,6 +192,11 @@ export const TabGridEditor = React.memo(function TabGridEditor({
                   )}
                 >
                   {stroke}
+                  {badge && (
+                    <span className={cn('ml-0.5', column.tuplet && !tupletValidity[colIndex] && 'text-destructive')}>
+                      {badge}
+                    </span>
+                  )}
                 </td>
               )
             })}
@@ -156,20 +211,24 @@ export const TabGridEditor = React.memo(function TabGridEditor({
                 {grid.columns.map((column, colIndex) => {
                   const isCursor = cursor.col === colIndex && cursor.string === stringNo
                   const cell = column.cells[stringNo]
-                  const barStart = colIndex % beatsPerBar === 0 && colIndex > 0
-                  const inActiveBar =
-                    activeBarStart !== null &&
-                    colIndex >= activeBarStart &&
-                    colIndex < activeBarStart + beatsPerBar
+                  const barStart = positions[colIndex]?.isBarStart && colIndex > 0
+                  const inActiveBar = activeBarIndex !== null && positions[colIndex]?.barIndex === activeBarIndex
                   const inSelection =
                     selection !== null && colIndex >= selection.start && colIndex <= selection.end
+                  const isDragSource =
+                    noteDrag !== null && noteDrag.sourceCol === colIndex && noteDrag.sourceString === stringNo
+                  const isDragTarget =
+                    noteDrag !== null &&
+                    noteDrag.targetCol === colIndex &&
+                    noteDrag.targetString === stringNo &&
+                    (noteDrag.targetCol !== noteDrag.sourceCol || noteDrag.targetString !== noteDrag.sourceString)
                   return (
                     <td
                       key={colIndex}
                       ref={isCursor ? cursorCellRef : undefined}
                       onClick={() => onSelectCell?.(colIndex, stringNo)}
-                      onMouseDown={() => onCellMouseDown?.(colIndex)}
-                      onMouseEnter={() => onCellMouseEnter?.(colIndex)}
+                      onMouseDown={() => onCellMouseDown?.(colIndex, stringNo)}
+                      onMouseEnter={() => onCellMouseEnter?.(colIndex, stringNo)}
                       onMouseUp={() => onCellMouseUp?.()}
                       className={cn(
                         'h-10 w-10 min-h-10 cursor-pointer px-0 py-0.5 text-center align-middle font-mono border-b border-border select-none',
@@ -183,6 +242,8 @@ export const TabGridEditor = React.memo(function TabGridEditor({
                         className={cn(
                           'mx-0.5 flex min-h-8 w-9 flex-col items-center justify-center gap-0.5 rounded',
                           isCursor && 'bg-primary/20 ring-2 ring-primary',
+                          isDragSource && 'opacity-40 ring-2 ring-primary',
+                          isDragTarget && 'bg-primary/20 ring-2 ring-primary',
                         )}
                       >
                         <span className={cn(cell ? 'text-foreground' : 'text-muted-foreground/40')}>

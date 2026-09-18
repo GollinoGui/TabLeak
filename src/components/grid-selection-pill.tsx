@@ -10,7 +10,8 @@ const COPIED_FEEDBACK_MS = 1200
 
 interface GridSelectionPillProps {
   selection: GridSelection
-  beatsPerBar: number
+  startBar: number
+  endBar: number
   scrollContainerRef: React.RefObject<HTMLDivElement | null>
   baseBpm: number
   minBpm: number
@@ -25,7 +26,8 @@ interface GridSelectionPillProps {
 
 export function GridSelectionPill({
   selection,
-  beatsPerBar,
+  startBar,
+  endBar,
   scrollContainerRef,
   baseBpm,
   minBpm,
@@ -57,8 +59,6 @@ export function GridSelectionPill({
     }
   }, [])
 
-  const startBar = Math.floor(selection.start / beatsPerBar)
-  const endBar = Math.floor(selection.end / beatsPerBar)
   const existing = tempoChanges.find((tc) => tc.startBar === startBar && tc.endBar === endBar)
   const barsLabel = startBar === endBar ? `Compasso ${startBar + 1}` : `Compassos ${startBar + 1}–${endBar + 1}`
 

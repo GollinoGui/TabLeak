@@ -302,6 +302,21 @@ export function useAlphaTab(
     applyScrollRef.current()
   }, [])
 
+  // Keeps the playback head parked at the edit cursor while paused/stopped,
+  // so pressing play always starts from wherever the user is currently
+  // editing instead of resuming from a previous, possibly much later,
+  // pause point — which otherwise made Play visibly snap the notation
+  // preview away to that old position (reported as the view "jumping
+  // down" whenever Space/Play was pressed).
+  const seekToCursor = React.useCallback((barIndex: number, beatIndex: number) => {
+    const api = apiRef.current
+    if (!api) return
+    const bar = api.score?.tracks[0]?.staves[0]?.bars[barIndex]
+    const beat = bar?.voices[0]?.beats[beatIndex]
+    if (!beat) return
+    api.tickPosition = beat.absolutePlaybackStart
+  }, [])
+
   const setLayoutMode = React.useCallback((mode: LayoutMode) => {
     const api = apiRef.current
     if (!api) return
@@ -359,6 +374,7 @@ export function useAlphaTab(
     playPause,
     stop,
     scrollToCursor,
+    seekToCursor,
     setLayoutMode,
     position,
     activeBeat,

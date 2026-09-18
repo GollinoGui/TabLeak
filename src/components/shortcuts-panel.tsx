@@ -14,6 +14,17 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
     ],
   },
   {
+    title: 'Duração',
+    items: [
+      ['Alt+1', 'Semínima (1/4)'],
+      ['Alt+2', 'Colcheia (1/8)'],
+      ['Alt+3', 'Semicolcheia (1/16)'],
+      ['Alt+4', 'Alterna tercina'],
+      ['Alt+5', 'Alterna sextina'],
+      ['Alt+6', 'Alterna pontuado'],
+    ],
+  },
+  {
     title: 'Técnicas',
     items: [
       ['S', 'Slide (liga com a próxima nota)'],

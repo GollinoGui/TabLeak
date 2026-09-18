@@ -82,10 +82,147 @@ export interface Cell {
   dead?: boolean
 }
 
+/** Base note value in the usual "denominator" sense: 4 = quarter, 8 =
+ * eighth, 16 = sixteenth. */
+export type NoteDuration = 4 | 8 | 16
+
 export interface Column {
   /** Keyed by alphaTex string number: 1 = highest-pitched string. */
   cells: Record<number, Cell>
   beatEffects: BeatEffect[]
+  /** Defaults to 4 (quarter) when absent — every column saved before this
+   * field existed is a quarter note, so leaving it unset keeps those tabs
+   * playing/rendering exactly as before. */
+  duration?: NoteDuration
+  dotted?: boolean
+  /** 3 = triplet, 6 = sextuplet. Grouping into one bracket is inferred by
+   * scanning consecutive columns that share the same tag (mirrors
+   * alphaTab's own tuplet auto-grouping) — see `tupletValidityFlags`. */
+  tuplet?: 3 | 6
+}
+
+/** One column is still always exactly one beat (see `computeColumnPositions`
+ * below) — but a beat is no longer necessarily a quarter note, so it no
+ * longer takes a fixed number of ticks. 48 divides cleanly by 2/3/4/6/8/16,
+ * so every duration this app supports (including dotted and triplet/
+ * sextuplet) lands on a whole number of ticks — no floating-point beat math
+ * anywhere else in the app. */
+export const TICKS_PER_QUARTER = 48
+
+/** How long `column` actually lasts, in ticks. A tuplet packs its notes into
+ * the time normally taken by the next-smaller power-of-two grouping (3 in
+ * the space of 2, 6 in the space of 4) — both cases are the same 2/3
+ * compression, which is why triplet and sextuplet share one ratio here. */
+export function columnTicks(column: Column): number {
+  const base = (TICKS_PER_QUARTER * 4) / (column.duration ?? 4)
+  const withDot = column.dotted ? (base * 3) / 2 : base
+  return column.tuplet ? Math.round((withDot * 2) / 3) : withDot
+}
+
+export interface ColumnPosition {
+  barIndex: number
+  /** 0-based ordinal position of this column within its bar — matches
+   * alphaTab's own `Beat.index` (the beat's position within its bar's
+   * voice), since `gridToAlphaTex` emits exactly one alphaTex beat per
+   * column, in column order, within each bar. */
+  beatIndexInBar: number
+  isBarStart: boolean
+}
+
+/** The one place bar/beat math happens for a variable-duration grid —
+ * everywhere else (rendering bar lines, tempo-change ranges, cursor
+ * scrolling, growth limits, alphaTeX generation) reads from this instead of
+ * `Math.floor(col / beatsPerBar)` / `col % beatsPerBar`, which only ever
+ * worked when every column was a fixed-size quarter note.
+ *
+ * A note is never split across a bar boundary: if the next column doesn't
+ * fit in the bar being filled, a new bar starts there instead, even though
+ * that can leave the bar it just closed short of a full `beatsPerBar`
+ * worth of ticks. That's an accepted cosmetic limitation, not something
+ * this function tries to fix by reflowing content. */
+export function computeColumnPositions(
+  columns: Column[],
+  beatsPerBar: number,
+): { positions: ColumnPosition[]; barStartColumn: number[] } {
+  const barCapacity = TICKS_PER_QUARTER * beatsPerBar
+  const positions: ColumnPosition[] = []
+  const barStartColumn: number[] = [0]
+  let barIndex = 0
+  let ticksInBar = 0
+  let beatIndexInBar = 0
+  columns.forEach((column, i) => {
+    const ticks = columnTicks(column)
+    if (ticksInBar > 0 && ticksInBar + ticks > barCapacity) {
+      barIndex++
+      ticksInBar = 0
+      beatIndexInBar = 0
+      barStartColumn.push(i)
+    }
+    positions.push({ barIndex, beatIndexInBar, isBarStart: beatIndexInBar === 0 })
+    ticksInBar += ticks
+    beatIndexInBar++
+  })
+  return { positions, barStartColumn }
+}
+
+/** The largest column index that still lands within `maxBars` bars — used to
+ * cap how far the grid is allowed to grow. Existing columns keep whatever
+ * duration they were given; any column past the current content is a
+ * hypothetical plain quarter note, matching what `ensureColumn` actually
+ * appends. */
+export function maxColumnIndexWithinBars(
+  columns: Column[],
+  beatsPerBar: number,
+  maxBars: number,
+): number {
+  const barCapacity = TICKS_PER_QUARTER * beatsPerBar
+  let barIndex = 0
+  let ticksInBar = 0
+  let lastValidIndex = -1
+  let i = 0
+  while (barIndex < maxBars) {
+    const ticks = i < columns.length ? columnTicks(columns[i]) : TICKS_PER_QUARTER * 4
+    if (ticksInBar > 0 && ticksInBar + ticks > barCapacity) {
+      barIndex++
+      ticksInBar = 0
+      if (barIndex >= maxBars) break
+    }
+    lastValidIndex = i
+    ticksInBar += ticks
+    i++
+  }
+  return lastValidIndex
+}
+
+/** Whether each column's `tuplet` tag should actually render as a bracket.
+ * alphaTab auto-collects consecutive beats sharing the same `tu` value into
+ * one bracket, closing it once the group reaches that many beats — so a
+ * stray edit (deleting one note out of a triplet, pasting into the middle
+ * of one) can leave a run whose length isn't a clean multiple of its
+ * tuplet size, which would otherwise bleed into whatever tuplet-tagged
+ * notes come after it. Runs are also cut at bar boundaries, matching how
+ * `gridToAlphaTex` emits one bar at a time. A malformed run renders as
+ * plain notes (no bracket) instead of corrupting later tuplets — this flags
+ * exactly which columns get that treatment, for both alphaTeX generation
+ * and the grid's own "incomplete" badge styling. */
+export function tupletValidityFlags(columns: Column[], positions: ColumnPosition[]): boolean[] {
+  const valid = new Array<boolean>(columns.length).fill(false)
+  let i = 0
+  while (i < columns.length) {
+    const tag = columns[i].tuplet
+    if (!tag) {
+      i++
+      continue
+    }
+    let j = i
+    while (j < columns.length && columns[j].tuplet === tag && positions[j].barIndex === positions[i].barIndex) {
+      j++
+    }
+    const complete = (j - i) % tag === 0
+    for (let k = i; k < j; k++) valid[k] = complete
+    i = j
+  }
+  return valid
 }
 
 /** A tempo override bounded to `[startBar, endBar]` (inclusive) — playback
@@ -107,11 +244,12 @@ export interface TabGrid {
 
 export const DEFAULT_BEATS_PER_BAR = 4
 
-/** Selectable time signatures. Denominator is fixed at a quarter note — the
- * grid's columns are always one quarter note each (see the global `:4` in
- * `gridToAlphaTex`), so only the numerator (beats per bar) is configurable.
- * Signatures like 6/8 would need a different note-duration unit for the
- * whole grid, which is out of scope for now. */
+/** Selectable time signatures. Denominator is fixed at a quarter note —
+ * `beatsPerBar` is how many quarter notes' worth of ticks fit in a bar (see
+ * `computeColumnPositions`), not how many grid columns, since a column can
+ * now be shorter than a quarter note. A true compound signature like 6/8
+ * (quarter-note pulse felt as dotted-quarter groupings) is still out of
+ * scope — this only varies the numerator. */
 export const BEATS_PER_BAR_OPTIONS = [2, 3, 4, 5, 6] as const
 
 export function createEmptyGrid(bars = 4, beatsPerBar = DEFAULT_BEATS_PER_BAR): TabGrid {
@@ -149,7 +287,9 @@ export function emptyColumn(): Column {
 }
 
 export function barCount(grid: TabGrid, beatsPerBar = DEFAULT_BEATS_PER_BAR): number {
-  return Math.ceil(grid.columns.length / beatsPerBar) || 1
+  if (grid.columns.length === 0) return 1
+  const { positions } = computeColumnPositions(grid.columns, beatsPerBar)
+  return positions[positions.length - 1].barIndex + 1
 }
 
 function escapeTexString(value: string): string {
@@ -219,9 +359,18 @@ function columnToTex(
   column: Column,
   letRingParens: boolean,
   lrOpenByString: Set<number>,
+  tupletValid: boolean,
 ): string {
   const entries = Object.entries(column.cells)
-  if (entries.length === 0) return 'r'
+  const duration = column.duration ?? 4
+  const beatProps = [
+    ...column.beatEffects,
+    ...(column.tuplet && tupletValid ? [`tu ${column.tuplet}`] : []),
+    ...(column.dotted ? ['d'] : []),
+  ]
+  const propsTag = beatProps.length ? `{${beatProps.join(' ')}}` : ''
+
+  if (entries.length === 0) return `r.${duration}${propsTag}`
 
   const notes = entries.map(([stringNoStr, cell]) => {
     const stringNo = Number(stringNoStr)
@@ -238,8 +387,7 @@ function columnToTex(
   })
 
   const body = notes.length > 1 ? `(${notes.join(' ')})` : notes[0]
-  const beatEffects = column.beatEffects.length ? `{${column.beatEffects.join(' ')}}` : ''
-  return body + beatEffects
+  return `${body}.${duration}${propsTag}`
 }
 
 /** Bass-range instruments (4/5 strings, e.g. standard bass tunings) read in
@@ -280,23 +428,33 @@ export function gridToAlphaTex(
   const bars: string[] = []
   const lrOpenByString = new Set<number>()
   let previousEffectiveBpm = bpm
-  for (let i = 0; i < grid.columns.length; i += beatsPerBar) {
-    const barIndex = i / beatsPerBar
-    const barColumns = grid.columns.slice(i, i + beatsPerBar)
-    const effectiveBpm = effectiveBpmAtBar(tempoChanges, barIndex, bpm)
-    const tempoPrefix = effectiveBpm !== previousEffectiveBpm ? `\\tempo ${effectiveBpm} ` : ''
-    previousEffectiveBpm = effectiveBpm
-    bars.push(tempoPrefix + barColumns.map((c) => columnToTex(c, letRingParens, lrOpenByString)).join(' '))
+  if (grid.columns.length > 0) {
+    const { positions, barStartColumn } = computeColumnPositions(grid.columns, beatsPerBar)
+    const tupletValid = tupletValidityFlags(grid.columns, positions)
+    for (let barIndex = 0; barIndex < barStartColumn.length; barIndex++) {
+      const start = barStartColumn[barIndex]
+      const end = barIndex + 1 < barStartColumn.length ? barStartColumn[barIndex + 1] : grid.columns.length
+      const barColumns = grid.columns.slice(start, end)
+      const effectiveBpm = effectiveBpmAtBar(tempoChanges, barIndex, bpm)
+      const tempoPrefix = effectiveBpm !== previousEffectiveBpm ? `\\tempo ${effectiveBpm} ` : ''
+      previousEffectiveBpm = effectiveBpm
+      bars.push(
+        tempoPrefix +
+          barColumns
+            .map((c, idx) => columnToTex(c, letRingParens, lrOpenByString, tupletValid[start + idx]))
+            .join(' '),
+      )
+    }
   }
-  if (bars.length === 0) bars.push(Array.from({ length: beatsPerBar }, () => 'r').join(' '))
+  if (bars.length === 0) bars.push(Array.from({ length: beatsPerBar }, () => 'r.4').join(' '))
 
   // Clef/time signature meta only needs to appear once, at the very start —
-  // it stays in effect for the rest of the piece until changed again. They
-  // must come before the `:4` global default-duration shorthand — alphaTex's
-  // parser rejects a meta tag once it's inside note-content mode.
+  // it stays in effect for the rest of the piece until changed again. Every
+  // bar's beats carry their own explicit `.duration`, so no global default
+  // duration shorthand is needed here.
   const meta = `\\clef ${clefFor(instrument)} \\ts (${beatsPerBar} 4)`
 
-  return `${header}\n\n${meta} :4 ${bars.join(' | ')} |`
+  return `${header}\n\n${meta} ${bars.join(' | ')} |`
 }
 
 export function serializeGrid(grid: TabGrid): string {

@@ -7,7 +7,7 @@ import { FRETBOARD_MAX_FRET, FretboardPicker } from '@/components/fretboard-pick
 import { GridSelectionPill } from '@/components/grid-selection-pill'
 import { PlaybackProgressBar } from '@/components/playback-progress-bar'
 import { TabBottomToolbar } from '@/components/tab-bottom-toolbar'
-import { TabGridEditor, type GridSelection } from '@/components/tab-grid-editor'
+import { TabGridEditor, type GridSelection, type NoteDragPreview } from '@/components/tab-grid-editor'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { useAlphaTab } from '@/hooks/use-alpha-tab'
@@ -19,11 +19,14 @@ import {
   type BendData,
   type BendKind,
   type Column,
+  type NoteDuration,
   type NoteEffect,
   type TabGrid,
   barCount,
+  computeColumnPositions,
   deserializeGrid,
   gridToAlphaTex,
+  maxColumnIndexWithinBars,
   serializeGrid,
   setTempoChangeForRange,
 } from '@/lib/tab-grid'
@@ -31,6 +34,7 @@ import { fretForNote, normalizeNoteName } from '@/lib/note-utils'
 import { useLibrary } from '@/store/library-store'
 
 const DIGIT_COMMIT_MS = 550
+const TEX_REGEN_DEBOUNCE_MS = 200
 const AUTOSAVE_MS = 1500
 const SAVED_FEEDBACK_MS = 1500
 const NOTE_LETTERS = new Set(['A', 'B', 'C', 'D', 'E', 'F', 'G'])
@@ -84,6 +88,7 @@ export function EditorPage() {
     isPlaying,
     error: alphaTabError,
     scrollToCursor,
+    seekToCursor,
     setLayoutMode,
     position,
     activeBeat,
@@ -136,39 +141,91 @@ export function EditorPage() {
     previewStart: number
     moved: boolean
   } | null>(null)
+  // Click-hold-drag of a single note (one string, one column) — separate
+  // from `gridDragRef` above, which only ever operates on whole columns.
+  // Starting a drag directly on a note picks it up instead of beginning a
+  // column-range selection; starting on an empty cell still does the latter.
+  const [noteDrag, setNoteDrag] = React.useState<NoteDragPreview | null>(null)
+  const noteDragRef = React.useRef<NoteDragPreview & { moved: boolean } | null>(null)
   const justDraggedRef = React.useRef(false)
   const clipboardRef = React.useRef<Column[] | null>(null)
 
   const stringCount = tab?.instrumentConfig.strings ?? 6
   const bars = barCount(grid, beatsPerBar)
   const atBarLimit = bars >= maxBarsPerTab
+
+  // One shared source of truth for "which bar/beat is column N in" — needed
+  // because columns can now have different durations, so a bar's column
+  // span is no longer just `beatsPerBar` at a fixed stride.
+  const { positions: columnPositions, barStartColumn } = React.useMemo(
+    () => computeColumnPositions(grid.columns, beatsPerBar),
+    [grid.columns, beatsPerBar],
+  )
   const activeColumn =
-    activeBeat != null ? activeBeat.barIndex * beatsPerBar + activeBeat.beatIndex : null
+    activeBeat != null && activeBeat.barIndex < barStartColumn.length
+      ? barStartColumn[activeBeat.barIndex] + activeBeat.beatIndex
+      : null
 
   // Regenerate the AlphaTab render whenever the underlying grid, tempo, time
-  // signature, or notation display preferences change.
+  // signature, or notation display preferences change. Debounced: alphaTab
+  // renders on a background worker, and firing `api.tex()` again before the
+  // previous render finishes can race the worker's response handling and
+  // crash it outright (reproduced: rapid edits — e.g. typing a fret then
+  // immediately toggling its duration — sent two overlapping renders and
+  // threw inside alphaTab's own `BoundsLookup.fromJson`, silently leaving
+  // the notation preview blank with no error the app could catch). Coalescing
+  // bursts of edits into one render closes that race without making the
+  // preview feel laggy — the interactive grid below still updates instantly.
+  const texTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
   React.useEffect(() => {
     if (!tab) return
-    setTex(
-      gridToAlphaTex(
-        tab.name,
-        tab.instrumentConfig,
-        grid,
-        bpm,
-        sound,
-        beatsPerBar,
-        showScore,
-        letRingParens,
-      ),
-    )
+    if (texTimeoutRef.current) clearTimeout(texTimeoutRef.current)
+    texTimeoutRef.current = setTimeout(() => {
+      setTex(
+        gridToAlphaTex(
+          tab.name,
+          tab.instrumentConfig,
+          grid,
+          bpm,
+          sound,
+          beatsPerBar,
+          showScore,
+          letRingParens,
+        ),
+      )
+    }, TEX_REGEN_DEBOUNCE_MS)
+    return () => {
+      if (texTimeoutRef.current) clearTimeout(texTimeoutRef.current)
+    }
   }, [grid, bpm, sound, beatsPerBar, showScore, letRingParens, tab, setTex])
 
   // Keep the notation preview scrolled to where the cursor currently is —
   // reapplied by the hook after every render too, so editing far into the
   // tab while scrolled elsewhere in the preview still brings it into view.
   React.useEffect(() => {
-    scrollToCursor(Math.floor(cursor.col / beatsPerBar), cursor.col % beatsPerBar)
-  }, [cursor.col, beatsPerBar, scrollToCursor])
+    const pos = columnPositions[cursor.col]
+    if (pos) scrollToCursor(pos.barIndex, pos.beatIndexInBar)
+  }, [cursor.col, columnPositions, scrollToCursor])
+
+  // Read inside the cursor-follow effect below without making `isPlaying`
+  // one of its dependencies — it must only re-seek when the cursor itself
+  // moves, not every time playback starts/stops (re-seeking on pause would
+  // overwrite the actual pause position with the edit cursor's).
+  const isPlayingRef = React.useRef(isPlaying)
+  React.useEffect(() => {
+    isPlayingRef.current = isPlaying
+  }, [isPlaying])
+
+  // Keep the playback head parked at the edit cursor while paused/stopped.
+  // Without this, Play resumes from wherever it last paused — which can be
+  // far from wherever the user has since clicked back to edit — and the
+  // notation preview visibly snaps away to that old position the moment
+  // Space/Play is pressed.
+  React.useEffect(() => {
+    if (isPlayingRef.current) return
+    const pos = columnPositions[cursor.col]
+    if (pos) seekToCursor(pos.barIndex, pos.beatIndexInBar)
+  }, [cursor.col, columnPositions, seekToCursor])
 
   // Debounced autosave.
   React.useEffect(() => {
@@ -214,11 +271,9 @@ export function EditorPage() {
     (col: number) => {
       setGrid((g) => {
         if (col < g.columns.length) return g
-        const barsNeeded = Math.ceil((col + 1) / beatsPerBar)
-        if (barsNeeded > maxBarsPerTab) return g
-        const extra = barsNeeded * beatsPerBar - g.columns.length
-        if (extra <= 0) return g
-        return { columns: [...g.columns, ...Array.from({ length: extra }, emptyColumnLocal)] }
+        if (col > maxColumnIndexWithinBars(g.columns, beatsPerBar, maxBarsPerTab)) return g
+        const extra = col + 1 - g.columns.length
+        return { ...g, columns: [...g.columns, ...Array.from({ length: extra }, emptyColumnLocal)] }
       })
     },
     [maxBarsPerTab, beatsPerBar],
@@ -230,13 +285,26 @@ export function EditorPage() {
       if (delta > 0) {
         const next = cursor.col + delta
         ensureColumn(next)
-        setCursor((c) => ({ ...c, col: Math.min(next, maxBarsPerTab * beatsPerBar - 1) }))
+        const maxCol = maxColumnIndexWithinBars(grid.columns, beatsPerBar, maxBarsPerTab)
+        setCursor((c) => ({ ...c, col: Math.min(next, Math.max(maxCol, 0)) }))
       } else {
         setCursor((c) => ({ ...c, col: Math.max(0, c.col + delta) }))
       }
     },
-    [cursor.col, commitDigitBuffer, ensureColumn, maxBarsPerTab, beatsPerBar],
+    [cursor.col, commitDigitBuffer, ensureColumn, grid.columns, maxBarsPerTab, beatsPerBar],
   )
+
+  // Dismisses the grid's own column-range selection *and* whatever alphaTab
+  // playback range/loop "tocar esse trecho" (handlePlaySelection) may have
+  // set from it — those two used to fall out of sync: closing the selection
+  // pill only cleared the grid's highlight, leaving alphaTab still playing
+  // and looping the old range on every subsequent Space/Play until the
+  // trecho happened to be re-selected, which read as playback randomly
+  // jumping to and looping some earlier part of the tab.
+  const clearGridSelection = React.useCallback(() => {
+    setGridSelection(null)
+    clearSelection()
+  }, [clearSelection])
 
   const handleSelectCell = React.useCallback(
     (col: number, stringNo: number) => {
@@ -251,13 +319,13 @@ export function EditorPage() {
       commitDigitBuffer()
       ensureColumn(col)
       setCursor({ col, string: stringNo })
-      setGridSelection(null)
+      clearGridSelection()
     },
-    [commitDigitBuffer, ensureColumn],
+    [commitDigitBuffer, ensureColumn, clearGridSelection],
   )
 
   const handleCellMouseDown = React.useCallback(
-    (col: number) => {
+    (col: number, stringNo: number) => {
       if (gridSelection && col >= gridSelection.start && col <= gridSelection.end) {
         gridDragRef.current = {
           mode: 'move',
@@ -267,22 +335,49 @@ export function EditorPage() {
           previewStart: gridSelection.start,
           moved: false,
         }
-      } else {
-        gridDragRef.current = {
-          mode: 'select',
-          anchorCol: col,
-          origStart: col,
-          origEnd: col,
-          previewStart: col,
+        return
+      }
+      // Starting the drag directly on a note picks it up to be moved to a
+      // new cell instead of beginning a whole-column range selection.
+      if (grid.columns[col]?.cells[stringNo]) {
+        noteDragRef.current = {
+          sourceCol: col,
+          sourceString: stringNo,
+          targetCol: col,
+          targetString: stringNo,
           moved: false,
         }
+        return
+      }
+      gridDragRef.current = {
+        mode: 'select',
+        anchorCol: col,
+        origStart: col,
+        origEnd: col,
+        previewStart: col,
+        moved: false,
       }
     },
-    [gridSelection],
+    [gridSelection, grid],
   )
 
   const handleCellMouseEnter = React.useCallback(
-    (col: number) => {
+    (col: number, stringNo: number) => {
+      const noteDragState = noteDragRef.current
+      if (noteDragState) {
+        if (col !== noteDragState.targetCol || stringNo !== noteDragState.targetString) {
+          noteDragState.moved = true
+        }
+        noteDragState.targetCol = col
+        noteDragState.targetString = stringNo
+        setNoteDrag({
+          sourceCol: noteDragState.sourceCol,
+          sourceString: noteDragState.sourceString,
+          targetCol: col,
+          targetString: stringNo,
+        })
+        return
+      }
       const drag = gridDragRef.current
       if (!drag) return
       if (col !== drag.anchorCol) drag.moved = true
@@ -294,16 +389,39 @@ export function EditorPage() {
       } else {
         const length = drag.origEnd - drag.origStart + 1
         const delta = col - drag.anchorCol
-        const maxStart = Math.max(0, maxBarsPerTab * beatsPerBar - length)
+        const maxStart = Math.max(0, grid.columns.length - length)
         const newStart = Math.max(0, Math.min(drag.origStart + delta, maxStart))
         drag.previewStart = newStart
         setGridSelection({ start: newStart, end: newStart + length - 1 })
       }
     },
-    [maxBarsPerTab, beatsPerBar],
+    [grid.columns.length],
   )
 
   const handleCellMouseUp = React.useCallback(() => {
+    const noteDragState = noteDragRef.current
+    noteDragRef.current = null
+    if (noteDragState) {
+      if (noteDragState.moved) {
+        justDraggedRef.current = true
+        if (
+          noteDragState.targetCol !== noteDragState.sourceCol ||
+          noteDragState.targetString !== noteDragState.sourceString
+        ) {
+          setGrid((g) =>
+            moveSingleNote(
+              g,
+              noteDragState.sourceCol,
+              noteDragState.sourceString,
+              noteDragState.targetCol,
+              noteDragState.targetString,
+            ),
+          )
+        }
+      }
+      setNoteDrag(null)
+      return
+    }
     const drag = gridDragRef.current
     gridDragRef.current = null
     if (!drag) return
@@ -324,21 +442,20 @@ export function EditorPage() {
   const handleSetTempoForSelection = React.useCallback(
     (bpm: number | null) => {
       if (!gridSelection) return
-      const startBar = Math.floor(gridSelection.start / beatsPerBar)
-      const endBar = Math.floor(gridSelection.end / beatsPerBar)
+      const startBar = columnPositions[gridSelection.start]?.barIndex ?? 0
+      const endBar = columnPositions[gridSelection.end]?.barIndex ?? 0
       setGrid((g) => setTempoChangeForRange(g, startBar, endBar, bpm))
     },
-    [gridSelection, beatsPerBar],
+    [gridSelection, columnPositions],
   )
 
   const handlePlaySelection = React.useCallback(() => {
     if (!gridSelection) return
-    const startBar = Math.floor(gridSelection.start / beatsPerBar)
-    const startBeat = gridSelection.start % beatsPerBar
-    const endBar = Math.floor(gridSelection.end / beatsPerBar)
-    const endBeat = gridSelection.end % beatsPerBar
-    playRange(startBar, startBeat, endBar, endBeat)
-  }, [gridSelection, beatsPerBar, playRange])
+    const start = columnPositions[gridSelection.start]
+    const end = columnPositions[gridSelection.end]
+    if (!start || !end) return
+    playRange(start.barIndex, start.beatIndexInBar, end.barIndex, end.beatIndexInBar)
+  }, [gridSelection, columnPositions, playRange])
 
   const handleCopySelection = React.useCallback(() => {
     if (!gridSelection) return
@@ -351,14 +468,14 @@ export function EditorPage() {
   }, [gridSelection])
 
   const handleCloseSelection = React.useCallback(() => {
-    setGridSelection(null)
-  }, [])
+    clearGridSelection()
+  }, [clearGridSelection])
 
   const handlePaste = React.useCallback(() => {
     const clip = clipboardRef.current
     if (!clip || clip.length === 0) return
     commitDigitBuffer()
-    setGrid((g) => insertColumnsAt(g, cursor.col, clip, maxBarsPerTab * beatsPerBar))
+    setGrid((g) => insertColumnsAt(g, cursor.col, clip, beatsPerBar, maxBarsPerTab))
   }, [cursor.col, maxBarsPerTab, beatsPerBar, commitDigitBuffer])
 
   const commitPick = React.useCallback(
@@ -367,9 +484,10 @@ export function EditorPage() {
       setPickerSelection({ string: stringNo, fret })
       const next = cursor.col + 1
       ensureColumn(next)
-      setCursor(() => ({ col: Math.min(next, maxBarsPerTab * beatsPerBar - 1), string: stringNo }))
+      const maxCol = maxColumnIndexWithinBars(grid.columns, beatsPerBar, maxBarsPerTab)
+      setCursor(() => ({ col: Math.min(next, Math.max(maxCol, 0)), string: stringNo }))
     },
-    [cursor.col, ensureColumn, maxBarsPerTab, beatsPerBar],
+    [cursor.col, ensureColumn, grid.columns, maxBarsPerTab, beatsPerBar],
   )
 
   const toggleFretboard = React.useCallback(() => {
@@ -499,6 +617,12 @@ export function EditorPage() {
           commitPick(pickerSelection.string, pickerSelection.fret)
           return
         }
+        if (e.key === ' ') {
+          e.preventDefault()
+          commitDigitBuffer()
+          playPause()
+          return
+        }
         return
       }
 
@@ -546,7 +670,7 @@ export function EditorPage() {
       if (e.key === 'Escape') {
         commitDigitBuffer()
         setNoteNameMode(false)
-        setGridSelection(null)
+        clearGridSelection()
         return
       }
 
@@ -601,7 +725,37 @@ export function EditorPage() {
         return
       }
 
-      if (/^[0-9]$/.test(e.key)) {
+      // Duration/tuplet/dot for the column at the cursor. Digits alone are
+      // already fully claimed by fret digit entry just below, so this needs
+      // Alt as a modifier: 1/2/3 pick a base duration, 4/5 toggle
+      // triplet/sextuplet, 6 toggles dotted.
+      if (e.altKey && /^[1-6]$/.test(e.key)) {
+        e.preventDefault()
+        commitDigitBuffer()
+        switch (e.key) {
+          case '1':
+            setGrid((g) => setColumnDuration(g, cursor.col, 4))
+            break
+          case '2':
+            setGrid((g) => setColumnDuration(g, cursor.col, 8))
+            break
+          case '3':
+            setGrid((g) => setColumnDuration(g, cursor.col, 16))
+            break
+          case '4':
+            setGrid((g) => toggleColumnTuplet(g, cursor.col, 3))
+            break
+          case '5':
+            setGrid((g) => toggleColumnTuplet(g, cursor.col, 6))
+            break
+          case '6':
+            setGrid((g) => toggleColumnDotted(g, cursor.col))
+            break
+        }
+        return
+      }
+
+      if (/^[0-9]$/.test(e.key) && !e.altKey) {
         e.preventDefault()
         setDigitBuffer((buffer) => {
           const next = (buffer + e.key).slice(0, 2)
@@ -724,6 +878,7 @@ export function EditorPage() {
     handleCopySelection,
     handlePaste,
     handleDeleteSelection,
+    clearGridSelection,
   ])
 
   if (!tab) {
@@ -794,6 +949,7 @@ export function EditorPage() {
             showNoteNames={showNoteNames}
             activeColumn={activeColumn}
             selection={gridSelection}
+            noteDrag={noteDrag}
             onCellMouseDown={handleCellMouseDown}
             onCellMouseEnter={handleCellMouseEnter}
             onCellMouseUp={handleCellMouseUp}
@@ -803,7 +959,8 @@ export function EditorPage() {
             <GridSelectionPill
               key={`${gridSelection.start}-${gridSelection.end}`}
               selection={gridSelection}
-              beatsPerBar={beatsPerBar}
+              startBar={columnPositions[gridSelection.start]?.barIndex ?? 0}
+              endBar={columnPositions[gridSelection.end]?.barIndex ?? 0}
               scrollContainerRef={gridScrollRef}
               baseBpm={bpm}
               minBpm={MIN_BPM}
@@ -914,12 +1071,49 @@ function moveColumnRange(grid: TabGrid, start: number, end: number, targetStart:
 
 /** Inserts `toInsert` at `index`, pushing everything from there onward to
  * the right (never overwriting existing content) — how pasting a copied
- * range lands in the tab. Extra columns past `maxColumns` are dropped rather
- * than silently growing the tab past the plan's bar limit. */
-function insertColumnsAt(grid: TabGrid, index: number, toInsert: Column[], maxColumns: number): TabGrid {
+ * range lands in the tab. Whatever lands past `maxBars` bars is dropped
+ * rather than silently growing the tab past the plan's bar limit — checked
+ * by bar, not by raw column count, since columns can carry different
+ * durations. */
+function insertColumnsAt(
+  grid: TabGrid,
+  index: number,
+  toInsert: Column[],
+  beatsPerBar: number,
+  maxBars: number,
+): TabGrid {
   const clampedIndex = Math.min(Math.max(0, index), grid.columns.length)
   const merged = [...grid.columns.slice(0, clampedIndex), ...toInsert, ...grid.columns.slice(clampedIndex)]
-  const columns = merged.length > maxColumns ? merged.slice(0, maxColumns) : merged
+  const { positions } = computeColumnPositions(merged, beatsPerBar)
+  const cutoff = positions.findIndex((p) => p.barIndex >= maxBars)
+  const columns = cutoff === -1 ? merged : merged.slice(0, cutoff)
+  return { ...grid, columns }
+}
+
+/** Moves a single note (fret, effects, bend, dead flag) from one cell to
+ * another — the single-note counterpart to `moveColumnRange`. Overwrites
+ * whatever was at the destination and leaves the source cell empty. */
+function moveSingleNote(
+  grid: TabGrid,
+  sourceCol: number,
+  sourceString: number,
+  targetCol: number,
+  targetString: number,
+): TabGrid {
+  if (sourceCol >= grid.columns.length || targetCol >= grid.columns.length) return grid
+  const cell = grid.columns[sourceCol].cells[sourceString]
+  if (!cell) return grid
+
+  const columns = grid.columns.slice()
+
+  const sourceCells = { ...columns[sourceCol].cells }
+  delete sourceCells[sourceString]
+  columns[sourceCol] = { ...columns[sourceCol], cells: sourceCells }
+
+  columns[targetCol] = {
+    ...columns[targetCol],
+    cells: { ...columns[targetCol].cells, [targetString]: cell },
+  }
   return { ...grid, columns }
 }
 
@@ -1050,4 +1244,30 @@ function toggleBeatEffect(grid: TabGrid, col: number, effect: BeatEffect): TabGr
   const columns = grid.columns.slice()
   columns[col] = { ...column, beatEffects }
   return { columns }
+}
+
+function setColumnDuration(grid: TabGrid, col: number, duration: NoteDuration): TabGrid {
+  if (col >= grid.columns.length) return grid
+  const columns = grid.columns.slice()
+  columns[col] = { ...columns[col], duration }
+  return { ...grid, columns }
+}
+
+/** Triplet/sextuplet is a toggle, not a pick from a list — pressing the same
+ * shortcut again clears it back to a plain note of whatever duration it
+ * already had. */
+function toggleColumnTuplet(grid: TabGrid, col: number, tuplet: 3 | 6): TabGrid {
+  if (col >= grid.columns.length) return grid
+  const column = grid.columns[col]
+  const columns = grid.columns.slice()
+  columns[col] = { ...column, tuplet: column.tuplet === tuplet ? undefined : tuplet }
+  return { ...grid, columns }
+}
+
+function toggleColumnDotted(grid: TabGrid, col: number): TabGrid {
+  if (col >= grid.columns.length) return grid
+  const column = grid.columns[col]
+  const columns = grid.columns.slice()
+  columns[col] = { ...column, dotted: !column.dotted }
+  return { ...grid, columns }
 }
