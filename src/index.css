@@ -127,8 +127,3 @@ body {
 .at-selection div {
   background: color-mix(in oklch, var(--primary) 20%, transparent);
 }
-
-.at-highlight * {
-  fill: var(--primary) !important;
-  stroke: var(--primary) !important;
-}

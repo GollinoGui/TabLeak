@@ -3,6 +3,19 @@ import type { model } from '@coderline/alphatab'
 import { AlphaTabApi, LayoutMode, NotationElement, ScrollMode } from '@coderline/alphatab'
 
 type Beat = model.Beat
+type Note = model.Note
+
+/** A plain (non-drag) click on the rendered notation, translated to the same
+ * bar/beat scheme the grid editor already uses elsewhere in this hook.
+ * `stringNo` is only known when the click landed precisely on a note head/
+ * number (see `noteMouseDown`'s `includeNoteBounds` requirement below) —
+ * `null` when it just hit the beat in general, so the consumer can fall back
+ * to whatever string it already had selected. */
+export interface NotationClick {
+  barIndex: number
+  beatIndex: number
+  stringNo: number | null
+}
 
 interface Rect {
   x: number
@@ -30,7 +43,7 @@ export interface SelectionRange {
 
 /** Scrolls `container` the minimum amount needed to bring `rect` (in the
  * container's content coordinate space) fully into view, on both axes. */
-function scrollRectIntoView(container: HTMLElement, rect: Rect) {
+function scrollRectIntoView(container: HTMLElement, rect: Rect, behavior: ScrollBehavior) {
   const margin = 16
   let left: number | undefined
   let top: number | undefined
@@ -48,15 +61,37 @@ function scrollRectIntoView(container: HTMLElement, rect: Rect) {
   }
 
   if (left === undefined && top === undefined) return
-  // Instant, not smooth: this runs after every edit (sometimes several times
-  // in quick succession while alphaTab settles a re-layout), and overlapping
-  // smooth-scroll animations fighting each other is what made the view
-  // visibly snap back to the start of the tab instead of following the cursor.
   container.scrollTo({
     left: left ?? container.scrollLeft,
     top: top ?? container.scrollTop,
-    behavior: 'instant',
+    behavior,
   })
+}
+
+/** alphaTab's live `Note.string` numbers strings low-to-high (1 = lowest,
+ * thickest string), the opposite of both alphaTeX's own `fret.string` text
+ * and this app's grid convention (1 = highest-pitched string — see
+ * `Column.cells` in `tab-grid.ts`). alphaTeX parsing itself applies this
+ * same inversion in reverse when turning written notes into `Note`
+ * instances, so this mirrors it to get back to the grid's numbering. */
+function gridStringNumber(note: Note): number {
+  return note.beat.voice.bar.staff.tuning.length - note.string + 1
+}
+
+/** Bounding box covering every rect in `rects`, or `null` if there are none. */
+function unionRects(rects: Rect[]): Rect | null {
+  if (rects.length === 0) return null
+  let x1 = Infinity
+  let y1 = Infinity
+  let x2 = -Infinity
+  let y2 = -Infinity
+  for (const r of rects) {
+    x1 = Math.min(x1, r.x)
+    y1 = Math.min(y1, r.y)
+    x2 = Math.max(x2, r.x + r.w)
+    y2 = Math.max(y2, r.y + r.h)
+  }
+  return { x: x1, y: y1, w: x2 - x1, h: y2 - y1 }
 }
 
 export function useAlphaTab(
@@ -71,12 +106,17 @@ export function useAlphaTab(
   const [activeBeat, setActiveBeat] = React.useState<ActiveBeat | null>(null)
   const [isLooping, setIsLoopingState] = React.useState(false)
   const [selectionRange, setSelectionRange] = React.useState<SelectionRange | null>(null)
+  const [notationClick, setNotationClick] = React.useState<NotationClick | null>(null)
 
   // Which beat to keep in view. Re-applied after every render (not just when
   // the target changes) because editing a note can reflow the notation (e.g.
   // wrap a new line), moving that beat even though the cursor didn't.
   const cursorTargetRef = React.useRef<{ barIndex: number; beatIndex: number } | null>(null)
-  const applyScrollRef = React.useRef<() => void>(() => {})
+  const applyScrollRef = React.useRef<(behavior: ScrollBehavior) => void>(() => {})
+  // Last bar the playback cursor actually scrolled to — lets the
+  // activeBeatsChanged handler below scroll at most once per bar instead of
+  // once per beat (see that handler for why).
+  const lastScrolledBarRef = React.useRef<number | null>(null)
 
   React.useEffect(() => {
     const el = containerRef.current
@@ -85,6 +125,11 @@ export function useAlphaTab(
     const api = new AlphaTabApi(el, {
       core: {
         fontDirectory: '/font/',
+        // Needed for `noteMouseDown` (off by default for render performance)
+        // — clicking a note in the rendered notation to jump the grid editor
+        // there needs to know exactly which string was clicked, not just
+        // which beat.
+        includeNoteBounds: true,
       },
       display: {
         // Horizontal (single endless line, scroll sideways) avoids bars ever
@@ -133,20 +178,44 @@ export function useAlphaTab(
         // follows the *edit* cursor instead; re-enabled only while playing,
         // so the view still tracks the playback cursor during playback.
         scrollMode: ScrollMode.Off,
+        // Default is a smoothly-gliding cursor that recomputes its on-screen
+        // position every animation frame instead of just jumping per beat —
+        // extra per-frame work with no benefit now that `scrollMode` above
+        // is handled by this hook's own applyScroll instead of alphaTab's
+        // built-in follow.
+        enableAnimatedBeatCursor: false,
+        // Default repaints every notation element of the currently-playing
+        // beat in the accent color (`.at-highlight` below) as playback moves
+        // through it. For a bend, that beat is a curve, an arrowhead, and a
+        // value label on top of the note itself — repainting all of it as
+        // one flat highlight is what read as "the bend animating" and
+        // looked visibly broken (e.g. arrowhead shapes that are normally
+        // unfilled outlines turning into solid blobs once `fill` is forced).
+        // Plain notes highlighted fine, but there's no per-element-type
+        // toggle to keep the feature for those and drop it just for bends,
+        // so it's off entirely — the `.at-cursor-bar`/`.at-cursor-beat` band
+        // and line already show what's currently playing.
+        enableElementHighlighting: false,
       },
     })
     apiRef.current = api
     setReady(true)
 
-    const applyScroll = () => {
+    const applyScroll = (behavior: ScrollBehavior) => {
       const target = cursorTargetRef.current
       const container = containerRef.current
       if (!target || !container) return
       const bar = api.score?.tracks[0]?.staves[0]?.bars[target.barIndex]
       const beat = bar?.voices[0]?.beats[target.beatIndex]
-      const bounds = beat ? api.boundsLookup?.findBeat(beat) : null
-      if (!bounds) return
-      scrollRectIntoView(container, bounds.realBounds)
+      // A beat is rendered once per visible staff (standard notation and
+      // tablature both), each with its own bounds. `findBeat` only returns
+      // the first of those, so scrolling by it alone could bring the
+      // notation into view while leaving the tab staff (stacked right below
+      // it) still off-screen — union both staves' bounds before scrolling.
+      const boundsList = beat ? api.boundsLookup?.findBeats(beat) : null
+      const rect = boundsList && boundsList.length > 0 ? unionRects(boundsList.map((b) => b.realBounds)) : null
+      if (!rect) return
+      scrollRectIntoView(container, rect, behavior)
     }
     applyScrollRef.current = applyScroll
 
@@ -160,11 +229,12 @@ export function useAlphaTab(
       // alphaTab's own bar/beat cursor has no such toggle, so it's driven via
       // this class instead (see the `.at-playing` rules in index.css).
       if (!playing) setActiveBeat(null)
+      // Force the very next activeBeatsChanged tick to scroll, even if it
+      // happens to land on the same bar a previous playback run last
+      // scrolled to — otherwise resuming after the user scrolled away while
+      // paused/editing wouldn't bring the view back.
+      if (playing) lastScrolledBarRef.current = null
       el.classList.toggle('at-playing', playing)
-      // Hand scrolling over to alphaTab's own playback-cursor tracking only
-      // while actually playing; back to our edit-cursor tracking otherwise.
-      api.settings.player.scrollMode = playing ? ScrollMode.Continuous : ScrollMode.Off
-      api.updateSettings()
     }
     api.playerStateChanged.on(onPlayerStateChanged)
 
@@ -172,7 +242,26 @@ export function useAlphaTab(
     // which without an active playback position means "back to the start" —
     // this listener runs after that (it fires from the same event) and wins,
     // scrolling to wherever the user is actually editing instead.
-    api.postRenderFinished.on(applyScroll)
+    //
+    // Debounced (rather than calling applyScroll directly): alphaTab can
+    // fire this several times in a row while it settles a re-layout after an
+    // edit, and the bounds it reports on an in-between pass can be
+    // transiently wrong (e.g. momentarily back at the top of the tab). With
+    // an animated scroll, acting on one of those passes means the animation
+    // can still be mid-flight toward that wrong spot when the next, correct
+    // pass runs and decides no further scrolling is needed — so it never
+    // gets corrected and the view is left having visibly snapped away.
+    // Waiting for the burst to go quiet means only the final, settled pass
+    // ever drives a scroll.
+    let renderScrollTimeout: ReturnType<typeof setTimeout> | null = null
+    const onRenderFinished = () => {
+      if (renderScrollTimeout !== null) clearTimeout(renderScrollTimeout)
+      renderScrollTimeout = setTimeout(() => {
+        renderScrollTimeout = null
+        applyScroll('smooth')
+      }, 100)
+    }
+    api.postRenderFinished.on(onRenderFinished)
 
     const onError = (e: unknown) => {
       const message = e instanceof Error ? e.message : String(e)
@@ -213,9 +302,43 @@ export function useAlphaTab(
     // current note/bar outside of alphaTab's own cursor (e.g. in the grid
     // editor). Bar/beat index here is the same scheme `scrollToCursor` above
     // already relies on — one grid column is always exactly one beat.
+    // Also re-targets the scroll-follow at this beat (instead of alphaTab's
+    // own built-in "Continuous" scroll mode, which unconditionally recenters
+    // the viewport on every tick — including the very first one, which was
+    // visibly yanking the notation view down as soon as Play/Space was
+    // pressed even when the playing bar was already fully on screen).
+    //
+    // The scroll itself only fires when `barIndex` actually changes, not on
+    // every beat: a fast passage (16th notes, a triplet run, ...) can fire
+    // this several times a second, and re-issuing a *smooth* scroll on every
+    // one of those restarts the in-flight animation before it settles — the
+    // view visibly stutters/stalls instead of gliding, which reads as
+    // "stuck" rather than as following playback. Once per bar is both
+    // enough (within a bar, `scrollRectIntoView`'s own margin check already
+    // no-ops unless the beat actually left the visible area) and slow
+    // enough that each animation has time to finish before the next fires.
+    //
+    // The scroll call itself is deferred a frame (rather than run inline
+    // here) because `activeBeatsChanged` fires from alphaTab's real-time
+    // playback scheduling — running the bounds lookup and a scrollTo
+    // synchronously in that same tick was blocking the main thread for just
+    // long enough, right as a new bar started, to make the audio scheduler
+    // miss its window and produce an audible stall exactly on bar changes
+    // (the same class of main-thread-contention glitch as the position/tex
+    // throttling above, just triggered by this scroll instead).
     const onActiveBeatsChanged = (e: { activeBeats: Beat[] }) => {
       const beat = e.activeBeats[0]
-      setActiveBeat(beat ? { barIndex: beat.voice.bar.index, beatIndex: beat.index } : null)
+      if (!beat) {
+        setActiveBeat(null)
+        return
+      }
+      const target = { barIndex: beat.voice.bar.index, beatIndex: beat.index }
+      setActiveBeat(target)
+      cursorTargetRef.current = target
+      if (lastScrolledBarRef.current !== target.barIndex) {
+        lastScrolledBarRef.current = target.barIndex
+        requestAnimationFrame(() => applyScrollRef.current('smooth'))
+      }
     }
     api.activeBeatsChanged.on(onActiveBeatsChanged)
 
@@ -232,12 +355,23 @@ export function useAlphaTab(
     // remembers the start beat, mousemove live-previews the range via
     // alphaTab's own highlight (doesn't affect playback yet), mouseup either
     // commits it (if the drag actually moved to a different beat) or clears
-    // any existing selection (a plain click with no drag).
+    // any existing selection (a plain click with no drag). A plain click also
+    // publishes `notationClick`, so the grid editor's own cursor can jump to
+    // wherever was clicked in the rendered notation — the reverse of the
+    // existing edit-cursor -> notation scroll-follow above.
     let dragStartBeat: Beat | null = null
+    let dragStartNote: Note | null = null
     let dragMoved = false
     const onBeatMouseDown = (beat: Beat) => {
       dragStartBeat = beat
+      dragStartNote = null
       dragMoved = false
+    }
+    // Fires alongside `beatMouseDown` (not instead of it) when the press
+    // landed precisely on a note head/number, giving the exact string —
+    // `beatMouseDown` alone only identifies the beat (every string on it).
+    const onNoteMouseDown = (note: Note) => {
+      dragStartNote = note
     }
     const onBeatMouseMove = (beat: Beat) => {
       if (!dragStartBeat) return
@@ -250,22 +384,33 @@ export function useAlphaTab(
       } else {
         api.clearPlaybackRangeHighlight()
         api.playbackRange = null
+        if (dragStartBeat) {
+          setNotationClick({
+            barIndex: dragStartBeat.voice.bar.index,
+            beatIndex: dragStartBeat.index,
+            stringNo: dragStartNote ? gridStringNumber(dragStartNote) : null,
+          })
+        }
       }
       dragStartBeat = null
+      dragStartNote = null
       dragMoved = false
     }
     api.beatMouseDown.on(onBeatMouseDown)
+    api.noteMouseDown.on(onNoteMouseDown)
     api.beatMouseMove.on(onBeatMouseMove)
     api.beatMouseUp.on(onBeatMouseUp)
 
     return () => {
       api.playerStateChanged.off(onPlayerStateChanged)
-      api.postRenderFinished.off(applyScroll)
+      api.postRenderFinished.off(onRenderFinished)
+      if (renderScrollTimeout !== null) clearTimeout(renderScrollTimeout)
       api.error.off(onError)
       api.playerPositionChanged.off(onPositionChanged)
       api.activeBeatsChanged.off(onActiveBeatsChanged)
       api.playbackRangeChanged.off(onPlaybackRangeChanged)
       api.beatMouseDown.off(onBeatMouseDown)
+      api.noteMouseDown.off(onNoteMouseDown)
       api.beatMouseMove.off(onBeatMouseMove)
       api.beatMouseUp.off(onBeatMouseUp)
       api.destroy()
@@ -275,6 +420,7 @@ export function useAlphaTab(
       setPosition(null)
       setActiveBeat(null)
       setSelectionRange(null)
+      setNotationClick(null)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -297,9 +443,16 @@ export function useAlphaTab(
     setActiveBeat(null)
   }, [])
 
+  // Fires on every cursor move while editing (each arrow key / typed note),
+  // which can be much more often than one settled edit — instant, not
+  // smooth, so a quick run of moves doesn't queue up a pile of overlapping
+  // scroll animations that fight each other (each restarting mid-flight,
+  // the exact failure mode that made the view look like it had stopped
+  // following the cursor). `onRenderFinished`'s own debounced smooth scroll
+  // still catches up afterward if editing reflowed the notation.
   const scrollToCursor = React.useCallback((barIndex: number, beatIndex: number) => {
     cursorTargetRef.current = { barIndex, beatIndex }
-    applyScrollRef.current()
+    applyScrollRef.current('instant')
   }, [])
 
   // Keeps the playback head parked at the edit cursor while paused/stopped,
@@ -378,6 +531,7 @@ export function useAlphaTab(
     setLayoutMode,
     position,
     activeBeat,
+    notationClick,
     seek,
     isLooping,
     setLooping,

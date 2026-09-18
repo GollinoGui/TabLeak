@@ -37,7 +37,9 @@ const EFFECT_LABEL: Record<string, string> = {
 
 function bendLabel(bend: BendData): string {
   const size = BEND_LABELS[bend.amount] ?? bend.amount
-  return bend.kind === 'prebend' ? `PB ${size} ↓` : `b ${size} ↑`
+  if (bend.kind === 'prebend') return `PB ${size} ↓`
+  if (bend.kind === 'bendRelease') return `b ${size} ↕`
+  return `b ${size} ↑`
 }
 
 /** Small per-column marking for a duration that isn't a plain quarter note —

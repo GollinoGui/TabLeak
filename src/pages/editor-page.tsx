@@ -10,7 +10,7 @@ import { TabBottomToolbar } from '@/components/tab-bottom-toolbar'
 import { TabGridEditor, type GridSelection, type NoteDragPreview } from '@/components/tab-grid-editor'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { useAlphaTab } from '@/hooks/use-alpha-tab'
+import { type NotationClick, useAlphaTab } from '@/hooks/use-alpha-tab'
 import {
   BEND_STEPS,
   DEFAULT_BEATS_PER_BAR,
@@ -92,6 +92,7 @@ export function EditorPage() {
     setLayoutMode,
     position,
     activeBeat,
+    notationClick,
     seek,
     isLooping,
     setLooping,
@@ -324,6 +325,37 @@ export function EditorPage() {
     [commitDigitBuffer, ensureColumn, clearGridSelection],
   )
 
+  // The reverse of the cursor -> notation scroll-follow effect further
+  // above: a plain click on the rendered notation/tab preview moves the
+  // grid editor's own cursor there too, instead of only scrolling the
+  // preview to match the grid like before. `notationClick` is a fresh object
+  // from the hook on every click (even a repeat click on the same beat), so
+  // this always re-fires rather than only reacting to an actual bar/beat
+  // change. Every bar/beat pair alphaTab can report a click for already has
+  // a column here (one grid column per emitted alphaTeX beat), so no bounds
+  // clamping is needed the way `ensureColumn` does for typing past the end.
+  //
+  // `handledNotationClickRef` guards against re-applying a *stale* click:
+  // `commitDigitBuffer` and `clearGridSelection` are recreated whenever the
+  // cursor moves (they close over it), so once this cursor move itself ran,
+  // the very next cursor move for any other reason (an arrow key, typing a
+  // fret) recreated those callbacks and re-ran this effect — which, with no
+  // guard, saw the same still-set `notationClick` and snapped the cursor
+  // straight back to the old click position, making the grid look stuck.
+  // Comparing by reference (not clearing `notationClick` itself back in the
+  // hook) means a genuine second click on the *same* beat — a new object —
+  // still goes through.
+  const handledNotationClickRef = React.useRef<NotationClick | null>(null)
+  React.useEffect(() => {
+    if (!notationClick || handledNotationClickRef.current === notationClick) return
+    handledNotationClickRef.current = notationClick
+    const col = barStartColumn[notationClick.barIndex]
+    if (col === undefined) return
+    commitDigitBuffer()
+    clearGridSelection()
+    setCursor((c) => ({ col: col + notationClick.beatIndex, string: notationClick.stringNo ?? c.string }))
+  }, [notationClick, barStartColumn, commitDigitBuffer, clearGridSelection])
+
   const handleCellMouseDown = React.useCallback(
     (col: number, stringNo: number) => {
       if (gridSelection && col >= gridSelection.start && col <= gridSelection.end) {
@@ -462,10 +494,36 @@ export function EditorPage() {
     clipboardRef.current = grid.columns.slice(gridSelection.start, gridSelection.end + 1)
   }, [gridSelection, grid])
 
+  // A selection that's already all empty rests has nothing left to clear —
+  // in that case delete removes the columns themselves (closing the gap)
+  // instead of a no-op clear, mirroring how Insert opens one up.
   const handleDeleteSelection = React.useCallback(() => {
     if (!gridSelection) return
-    setGrid((g) => clearColumnRange(g, gridSelection.start, gridSelection.end))
-  }, [gridSelection])
+    const { start, end } = gridSelection
+    const allEmpty = grid.columns.slice(start, end + 1).every(isColumnEmpty)
+    if (allEmpty) {
+      const newLength = Math.max(grid.columns.length - (end - start + 1), 1)
+      setGrid((g) => removeColumnRange(g, start, end))
+      setCursor((c) => ({ ...c, col: cursorColAfterRemoval(c.col, start, end, newLength) }))
+      clearGridSelection()
+    } else {
+      setGrid((g) => clearColumnRange(g, start, end))
+    }
+  }, [gridSelection, grid, clearGridSelection])
+
+  // Same "already empty → remove instead of no-op clear" behavior as
+  // `handleDeleteSelection`, for the single-column case (no active
+  // selection) that Backspace/Delete handle directly.
+  const handleDeleteAtCursor = React.useCallback(() => {
+    const column = grid.columns[cursor.col]
+    if (column && isColumnEmpty(column)) {
+      const newLength = Math.max(grid.columns.length - 1, 1)
+      setGrid((g) => removeColumnRange(g, cursor.col, cursor.col))
+      setCursor((c) => ({ ...c, col: cursorColAfterRemoval(c.col, cursor.col, cursor.col, newLength) }))
+    } else {
+      setGrid((g) => clearCell(g, cursor.col, cursor.string))
+    }
+  }, [grid, cursor.col, cursor.string])
 
   const handleCloseSelection = React.useCallback(() => {
     clearGridSelection()
@@ -476,6 +534,17 @@ export function EditorPage() {
     if (!clip || clip.length === 0) return
     commitDigitBuffer()
     setGrid((g) => insertColumnsAt(g, cursor.col, clip, beatsPerBar, maxBarsPerTab))
+  }, [cursor.col, maxBarsPerTab, beatsPerBar, commitDigitBuffer])
+
+  // Inserts a blank column (a rest) at the cursor, pushing everything from
+  // there onward one column to the right — for opening up space between two
+  // notes without overwriting either one. Distinct from Backspace/Delete,
+  // which clear a cell/range back to a rest in place but don't shift
+  // anything; this is the same "make room" move `handlePaste` already does,
+  // just with a single empty column instead of clipboard content.
+  const handleInsertColumn = React.useCallback(() => {
+    commitDigitBuffer()
+    setGrid((g) => insertColumnsAt(g, cursor.col, [emptyColumnLocal()], beatsPerBar, maxBarsPerTab))
   }, [cursor.col, maxBarsPerTab, beatsPerBar, commitDigitBuffer])
 
   const commitPick = React.useCallback(
@@ -680,8 +749,14 @@ export function EditorPage() {
         if (gridSelection) {
           handleDeleteSelection()
         } else {
-          setGrid((g) => clearCell(g, cursor.col, cursor.string))
+          handleDeleteAtCursor()
         }
+        return
+      }
+
+      if (e.key === 'Insert') {
+        e.preventDefault()
+        handleInsertColumn()
         return
       }
 
@@ -771,7 +846,12 @@ export function EditorPage() {
       if (key === 'b') {
         e.preventDefault()
         commitDigitBuffer()
-        const kind: BendKind = e.shiftKey ? 'prebend' : 'bend'
+        // Ctrl/Cmd takes priority over Shift so the three kinds stay on one
+        // key: plain bend (rises and holds), Shift for pre-bend (starts
+        // already bent), Ctrl for bend-and-release (rises then falls back
+        // within the same note — the "full sound" of a bend played both
+        // ways on one pick).
+        const kind: BendKind = e.ctrlKey || e.metaKey ? 'bendRelease' : e.shiftKey ? 'prebend' : 'bend'
         setGrid((g) => cycleBend(g, cursor.col, cursor.string, kind))
         return
       }
@@ -878,6 +958,8 @@ export function EditorPage() {
     handleCopySelection,
     handlePaste,
     handleDeleteSelection,
+    handleDeleteAtCursor,
+    handleInsertColumn,
     clearGridSelection,
   ])
 
@@ -1054,6 +1136,30 @@ function setCellFret(grid: TabGrid, col: number, stringNo: number, fret: number)
 function clearColumnRange(grid: TabGrid, start: number, end: number): TabGrid {
   const columns = grid.columns.map((column, i) => (i >= start && i <= end ? emptyColumnLocal() : column))
   return { ...grid, columns }
+}
+
+function isColumnEmpty(column: Column): boolean {
+  return Object.keys(column.cells).length === 0
+}
+
+/** Removes `[start, end]` outright, closing the gap by shifting everything
+ * after it left — the counterpart to `insertColumnsAt`. Only called once the
+ * caller has confirmed every column in the range is already an empty rest,
+ * so this can never silently discard a note the way removing a written
+ * column would. Never lets the grid shrink to zero columns — everything
+ * else assumes there's always at least one to land the cursor on. */
+function removeColumnRange(grid: TabGrid, start: number, end: number): TabGrid {
+  const columns = [...grid.columns.slice(0, start), ...grid.columns.slice(end + 1)]
+  return { ...grid, columns: columns.length > 0 ? columns : [emptyColumnLocal()] }
+}
+
+/** Where the cursor should land after `removeColumnRange([start, end])` —
+ * the same content it was over if that's still around, otherwise wherever
+ * that content shifted to, clamped into the now-shorter grid. */
+function cursorColAfterRemoval(col: number, start: number, end: number, newLength: number): number {
+  const removed = end - start + 1
+  const shifted = col < start ? col : col > end ? col - removed : start
+  return Math.max(0, Math.min(shifted, newLength - 1))
 }
 
 /** Relocates `[start, end]` so it starts at `targetStart`, shifting whatever

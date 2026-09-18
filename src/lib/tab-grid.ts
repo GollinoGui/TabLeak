@@ -33,9 +33,11 @@ export type NoteEffect =
  * (up/down) shown above the beat; they're mutually exclusive with each other. */
 export type BeatEffect = 'tt' | 'su' | 'sd'
 
-/** A bend that rises into the note, vs. a pre-bend that starts already bent
- * and (optionally) releases down. */
-export type BendKind = 'bend' | 'prebend'
+/** A bend that rises into the note, a pre-bend that starts already bent
+ * and (optionally) releases down, or a bend-and-release that rises into the
+ * note and comes back down before it ends (the "full sound" of the bend,
+ * heard going both up and down on a single pick). */
+export type BendKind = 'bend' | 'prebend' | 'bendRelease'
 
 /** Bend size in quarter-steps: 1 = 1/4, 2 = 1/2, 4 = full, 8 = two full steps. */
 export interface BendData {
@@ -305,9 +307,19 @@ function tuningToAlphaTex(tuningLowToHigh: string[]): string {
 }
 
 /** `p` (pull-off) has no dedicated alphaTex tag — alphaTab derives hammer-on vs.
- * pull-off display from the pitch difference between notes, so both compile to `h`. */
+ * pull-off display from the pitch difference between notes, so both compile to `h`.
+ *
+ * `ph` (pinch harmonic) needs an explicit harmonic-node value or alphaTab leaves
+ * `note.harmonicValue` at its default of 0, which its own harmonic-pitch lookup
+ * treats as "no harmonic" — the note then plays at its plain fretted pitch with
+ * no audible change at all. `nh` doesn't need this: alphaTab derives its value
+ * from the fret automatically. 12 is the octave node (touch the string 12 frets
+ * above the fretted note), the harmonic actually used for a pinch/pick-hand
+ * harmonic in practice, so it's hardcoded here rather than exposed as a UI
+ * option for a value that's effectively always the same. */
 function effectToTex(effect: Exclude<NoteEffect, 'lr'>): string {
   if (effect === 'p') return 'h'
+  if (effect === 'ph') return 'ph 12'
   return effect
 }
 
@@ -347,25 +359,46 @@ function letRingTag(
 
 /** alphaTex requires the bend effect to carry explicit bend points; a bare
  * `{b}` fails semantic validation and aborts the whole render. Bend type
- * (bend / release / prebend / prebend-release / ...) is inferred by alphaTab
- * from the point values, so we only need to supply the value sequence:
- * a bend rises from unbent (0) to the target size, a pre-bend starts at the
- * target size and falls back to 0. */
+ * (bend / release / prebend / prebend-release / bend-release / ...) is
+ * inferred by alphaTab from the point values, so we only need to supply the
+ * value sequence: a bend rises from unbent (0) to the target size, a
+ * pre-bend starts at the target size and falls back to 0, and a
+ * bend-and-release rises from 0 to the target size and back down to 0 again
+ * within the same note — three points, middle one higher than both ends,
+ * is exactly what alphaTab's own point-pattern matching recognizes as
+ * `BendType.BendRelease` (see its `Note.finish()`), which plays the full
+ * up-then-down pitch sweep instead of just holding the bent pitch. */
 function bendToTex(bend: BendData): string {
-  return bend.kind === 'prebend' ? `b (${bend.amount} 0)` : `b (0 ${bend.amount})`
+  if (bend.kind === 'prebend') return `b (${bend.amount} 0)`
+  if (bend.kind === 'bendRelease') return `b (0 ${bend.amount} 0)`
+  return `b (0 ${bend.amount})`
 }
 
 function columnToTex(
   column: Column,
   letRingParens: boolean,
   lrOpenByString: Set<number>,
-  tupletValid: boolean,
 ): string {
   const entries = Object.entries(column.cells)
   const duration = column.duration ?? 4
+  // The `tu` tag is what actually tells alphaTab to compress this beat's
+  // playback ticks by 2/3 — it's applied per beat, not per bracket, so it's
+  // emitted here unconditionally for every tuplet-tagged column, regardless
+  // of `tupletValidityFlags`. That flag only controls whether the grid shows
+  // the "incomplete" warning and (via that same distinction) used to also
+  // gate this tag, which meant an in-progress/malformed run played at full,
+  // uncompressed duration — silently diverging from `columnTicks`, which
+  // always assumes the compression when computing bar boundaries. That
+  // mismatch is what let a column's actual bar (as alphaTab lays out the
+  // emitted alphaTeX) drift from the bar this app's own math had already
+  // decided it was in, desyncing the playback highlight/scroll and any
+  // bar-scoped tempo change for everything after it. Leaving the tag on
+  // keeps ticks consistent always; the only cost is that alphaTab's own
+  // bracket-grouping may visually mis-span an incomplete run, which is a
+  // rendering nicety, not a timing bug.
   const beatProps = [
     ...column.beatEffects,
-    ...(column.tuplet && tupletValid ? [`tu ${column.tuplet}`] : []),
+    ...(column.tuplet ? [`tu ${column.tuplet}`] : []),
     ...(column.dotted ? ['d'] : []),
   ]
   const propsTag = beatProps.length ? `{${beatProps.join(' ')}}` : ''
@@ -429,8 +462,7 @@ export function gridToAlphaTex(
   const lrOpenByString = new Set<number>()
   let previousEffectiveBpm = bpm
   if (grid.columns.length > 0) {
-    const { positions, barStartColumn } = computeColumnPositions(grid.columns, beatsPerBar)
-    const tupletValid = tupletValidityFlags(grid.columns, positions)
+    const { barStartColumn } = computeColumnPositions(grid.columns, beatsPerBar)
     for (let barIndex = 0; barIndex < barStartColumn.length; barIndex++) {
       const start = barStartColumn[barIndex]
       const end = barIndex + 1 < barStartColumn.length ? barStartColumn[barIndex + 1] : grid.columns.length
@@ -439,10 +471,7 @@ export function gridToAlphaTex(
       const tempoPrefix = effectiveBpm !== previousEffectiveBpm ? `\\tempo ${effectiveBpm} ` : ''
       previousEffectiveBpm = effectiveBpm
       bars.push(
-        tempoPrefix +
-          barColumns
-            .map((c, idx) => columnToTex(c, letRingParens, lrOpenByString, tupletValid[start + idx]))
-            .join(' '),
+        tempoPrefix + barColumns.map((c) => columnToTex(c, letRingParens, lrOpenByString)).join(' '),
       )
     }
   }
