@@ -13,6 +13,7 @@ const EFFECT_LABEL: Record<string, string> = {
   pm: 'PM',
   v: '~',
   nh: 'nh',
+  lr: 'LR',
 }
 
 function bendLabel(bend: BendData): string {

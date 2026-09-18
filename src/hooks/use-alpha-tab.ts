@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { AlphaTabApi, LayoutMode } from '@coderline/alphatab'
+import { AlphaTabApi, LayoutMode, NotationElement } from '@coderline/alphatab'
 
 interface Rect {
   x: number
@@ -35,7 +35,10 @@ function scrollRectIntoView(container: HTMLElement, rect: Rect) {
   })
 }
 
-export function useAlphaTab(containerRef: React.RefObject<HTMLDivElement | null>) {
+export function useAlphaTab(
+  containerRef: React.RefObject<HTMLDivElement | null>,
+  initialLayoutMode: LayoutMode = LayoutMode.Horizontal,
+) {
   const apiRef = React.useRef<AlphaTabApi | null>(null)
   const [isPlaying, setIsPlaying] = React.useState(false)
   const [ready, setReady] = React.useState(false)
@@ -56,15 +59,26 @@ export function useAlphaTab(containerRef: React.RefObject<HTMLDivElement | null>
         fontDirectory: '/font/',
       },
       display: {
-        // Horizontal instead of the default page layout: bars never wrap onto
-        // a new line, so a slide/tie/bend that connects into the next bar's
-        // first note always renders with both notes on the same line instead
-        // of getting cut across a line break.
-        layoutMode: LayoutMode.Horizontal,
+        // Horizontal (single endless line, scroll sideways) avoids bars ever
+        // wrapping mid-phrase — a slide/tie/bend into the next bar's first
+        // note always stays on the same line instead of getting cut across a
+        // line break. Page (default) wraps bars downward instead, which some
+        // users prefer for a shorter, scroll-down view; exposed as a toggle.
+        layoutMode: initialLayoutMode,
         // A bit more room between beats than the default so effects on
         // adjacent notes (e.g. a bend's value label and a following
         // slide/hammer-on/pull-off curve) don't run into each other.
         stretchForce: 1.3,
+      },
+      notation: {
+        // The tempo/dynamics markings alphaTab shows by default duplicate the
+        // app's own BPM control and aren't editable from this app, so they're
+        // just clutter — worse, "tempo" sitting right above beat 1 can visibly
+        // crowd a vibrato marking placed on that same first beat.
+        elements: new Map([
+          [NotationElement.EffectTempo, false],
+          [NotationElement.EffectDynamics, false],
+        ]),
       },
       player: {
         enablePlayer: true,
@@ -136,5 +150,13 @@ export function useAlphaTab(containerRef: React.RefObject<HTMLDivElement | null>
     applyScrollRef.current()
   }, [])
 
-  return { ready, isPlaying, error, setTex, playPause, stop, scrollToCursor }
+  const setLayoutMode = React.useCallback((mode: LayoutMode) => {
+    const api = apiRef.current
+    if (!api) return
+    api.settings.display.layoutMode = mode
+    api.updateSettings()
+    api.render()
+  }, [])
+
+  return { ready, isPlaying, error, setTex, playPause, stop, scrollToCursor, setLayoutMode }
 }

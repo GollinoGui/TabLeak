@@ -1,6 +1,7 @@
 import * as React from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
+import { LayoutMode } from '@coderline/alphatab'
 
 import { FRETBOARD_MAX_FRET, FretboardPicker } from '@/components/fretboard-picker'
 import { TabBottomToolbar } from '@/components/tab-bottom-toolbar'
@@ -31,6 +32,16 @@ const NOTE_LETTERS = new Set(['A', 'B', 'C', 'D', 'E', 'F', 'G'])
 const MIN_BPM = 30
 const MAX_BPM = 300
 const BPM_STEP = 5
+const LAYOUT_MODE_STORAGE_KEY = 'tableak.layoutMode'
+
+/** Notation layout is a display preference, not tab content — kept in
+ * localStorage (shared across tabs) instead of the saved tab data. */
+function getInitialLayoutMode(): LayoutMode {
+  if (typeof window === 'undefined') return LayoutMode.Horizontal
+  return window.localStorage.getItem(LAYOUT_MODE_STORAGE_KEY) === 'page'
+    ? LayoutMode.Page
+    : LayoutMode.Horizontal
+}
 
 export function EditorPage() {
   const { tabId } = useParams<{ tabId: string }>()
@@ -38,8 +49,16 @@ export function EditorPage() {
   const tab = tabId ? getTab(tabId) : undefined
 
   const containerRef = React.useRef<HTMLDivElement>(null)
-  const { setTex, playPause, stop, isPlaying, error: alphaTabError, scrollToCursor } =
-    useAlphaTab(containerRef)
+  const [layoutMode, setLayoutModeState] = React.useState<LayoutMode>(getInitialLayoutMode)
+  const {
+    setTex,
+    playPause,
+    stop,
+    isPlaying,
+    error: alphaTabError,
+    scrollToCursor,
+    setLayoutMode,
+  } = useAlphaTab(containerRef, layoutMode)
 
   const [grid, setGrid] = React.useState<TabGrid>(() => deserializeGrid(tab?.content ?? null))
   const [bpm, setBpm] = React.useState(tab?.bpm ?? 120)
@@ -175,6 +194,18 @@ export function EditorPage() {
     if (savedFeedbackTimeoutRef.current) clearTimeout(savedFeedbackTimeoutRef.current)
     savedFeedbackTimeoutRef.current = setTimeout(() => setJustSaved(false), SAVED_FEEDBACK_MS)
   }, [tab, grid, bpm, commitDigitBuffer, updateTabContent, updateTabBpm])
+
+  const handleToggleLayoutMode = React.useCallback(() => {
+    setLayoutModeState((mode) => {
+      const next = mode === LayoutMode.Horizontal ? LayoutMode.Page : LayoutMode.Horizontal
+      window.localStorage.setItem(
+        LAYOUT_MODE_STORAGE_KEY,
+        next === LayoutMode.Page ? 'page' : 'horizontal',
+      )
+      setLayoutMode(next)
+      return next
+    })
+  }, [setLayoutMode])
 
   const handleBpmChange = React.useCallback((next: number) => {
     setBpm(Math.min(MAX_BPM, Math.max(MIN_BPM, next)))
@@ -340,6 +371,7 @@ export function EditorPage() {
         m: 'pm',
         '~': 'v',
         k: 'nh',
+        l: 'lr',
       }
       if (key in noteEffectByKey) {
         e.preventDefault()
@@ -490,6 +522,8 @@ export function EditorPage() {
         bpmStep={BPM_STEP}
         minBpm={MIN_BPM}
         maxBpm={MAX_BPM}
+        layoutMode={layoutMode}
+        onToggleLayoutMode={handleToggleLayoutMode}
       />
     </div>
   )
@@ -615,10 +649,14 @@ const MUTUALLY_EXCLUSIVE_BEAT_EFFECTS: Partial<Record<BeatEffect, BeatEffect>> =
   sd: 'su',
 }
 
+/** Beat-level effects (pick stroke, tapping, ...) annotate a played beat, so
+ * they don't make sense on a beat with no notes in it — silently ignore the
+ * toggle instead of producing a stray marking over a rest. */
 function toggleBeatEffect(grid: TabGrid, col: number, effect: BeatEffect): TabGrid {
   if (col >= grid.columns.length) return grid
   const column = grid.columns[col]
   const has = column.beatEffects.includes(effect)
+  if (!has && Object.keys(column.cells).length === 0) return grid
   const opposite = MUTUALLY_EXCLUSIVE_BEAT_EFFECTS[effect]
   const beatEffects = has
     ? column.beatEffects.filter((e) => e !== effect)

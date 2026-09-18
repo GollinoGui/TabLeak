@@ -6,8 +6,11 @@ import type { InstrumentConfig } from '@/types'
  * alphaTex's single `h` tag — alphaTab infers the actual direction from pitch.
  * `sl` connects to the following note (its direction is inferred from pitch too).
  * `sib`/`sia` mark a slide with no defined starting fret — the note is entered
- * by sliding up from below (`sib`) or down from above (`sia`) an unspecified fret. */
-export type NoteEffect = 'h' | 'p' | 'sl' | 'sib' | 'sia' | 'pm' | 'v' | 'nh'
+ * by sliding up from below (`sib`) or down from above (`sia`) an unspecified fret.
+ * `lr` (let ring) marks the note as left to ring out instead of being cut off;
+ * alphaTab draws a line from it extending through any following notes that
+ * are also `lr`, up to the first one that isn't. */
+export type NoteEffect = 'h' | 'p' | 'sl' | 'sib' | 'sia' | 'pm' | 'v' | 'nh' | 'lr'
 
 /** Beat-level alphaTex property tags. `su`/`sd` mark the pick-stroke direction
  * (up/down) shown above the beat; they're mutually exclusive with each other. */

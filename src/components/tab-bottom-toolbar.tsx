@@ -1,3 +1,4 @@
+import { LayoutMode } from '@coderline/alphatab'
 import {
   Check,
   ChevronLeft,
@@ -10,6 +11,8 @@ import {
   Plus,
   RotateCcw,
   Save,
+  StretchHorizontal,
+  WrapText,
 } from 'lucide-react'
 
 import { ShortcutsPanel } from '@/components/shortcuts-panel'
@@ -32,6 +35,8 @@ interface TabBottomToolbarProps {
   bpmStep: number
   minBpm: number
   maxBpm: number
+  layoutMode: LayoutMode
+  onToggleLayoutMode: () => void
 }
 
 export function TabBottomToolbar({
@@ -49,7 +54,10 @@ export function TabBottomToolbar({
   bpmStep,
   minBpm,
   maxBpm,
+  layoutMode,
+  onToggleLayoutMode,
 }: TabBottomToolbarProps) {
+  const isHorizontal = layoutMode === LayoutMode.Horizontal
   return (
     <div className="pointer-events-none fixed inset-x-0 bottom-4 z-30 flex justify-center px-4">
       <div className="pointer-events-auto flex items-center gap-1 rounded-full border border-border bg-card/95 p-1.5 shadow-lg backdrop-blur">
@@ -117,6 +125,21 @@ export function TabBottomToolbar({
           <Guitar />
         </Button>
 
+        <Button
+          variant="ghost"
+          size="icon"
+          className="rounded-full"
+          onClick={onToggleLayoutMode}
+          aria-label="Alternar layout da partitura"
+          title={
+            isHorizontal
+              ? 'Layout horizontal (clique para quebrar compassos para baixo)'
+              : 'Compassos quebram para baixo (clique para layout horizontal)'
+          }
+        >
+          {isHorizontal ? <StretchHorizontal /> : <WrapText />}
+        </Button>
+
         <span className="mx-1 h-6 w-px bg-border" />
 
         <ThemeToggle />
@@ -138,7 +161,8 @@ export function TabBottomToolbar({
           </Button>
           <div
             className={cn(
-              'invisible absolute right-0 bottom-full mb-3 w-72 -translate-y-1 rounded-lg border border-border bg-popover p-3 opacity-0 shadow-lg',
+              'invisible absolute right-0 bottom-full mb-3 max-h-[min(26rem,70vh)] w-[min(26rem,calc(100vw-2rem))]',
+              '-translate-y-1 overflow-y-auto rounded-lg border border-border bg-popover p-3 opacity-0 shadow-lg',
               'transition-all group-hover:visible group-hover:translate-y-0 group-hover:opacity-100',
               'group-focus-within:visible group-focus-within:translate-y-0 group-focus-within:opacity-100',
             )}
