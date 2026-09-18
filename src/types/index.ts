@@ -36,6 +36,10 @@ export interface Tab {
   instrumentConfig: InstrumentConfig
   content: string | null
   bpm: number
+  /** General MIDI program number (0-127) used for audio playback. Optional
+   * because tabs saved before this feature existed don't have it — callers
+   * fall back to a default. */
+  sound?: number
   isDeleted: boolean
   deletedAt: string | null
   createdAt: string

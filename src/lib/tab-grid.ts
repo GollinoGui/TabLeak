@@ -7,9 +7,10 @@ import type { InstrumentConfig } from '@/types'
  * `sl` connects to the following note (its direction is inferred from pitch too).
  * `sib`/`sia` mark a slide with no defined starting fret — the note is entered
  * by sliding up from below (`sib`) or down from above (`sia`) an unspecified fret.
- * `lr` (let ring) marks the note as left to ring out instead of being cut off;
- * alphaTab draws a line from it extending through any following notes that
- * are also `lr`, up to the first one that isn't. */
+ * `lr` (let ring) marks the note as tied into the next occurrence of the same
+ * pitch on the same string, so it keeps ringing instead of being cut off —
+ * mark both the starting note and the note it rings into. See `effectToTex`
+ * for why this compiles to a tie rather than alphaTex's own `lr` tag. */
 export type NoteEffect = 'h' | 'p' | 'sl' | 'sib' | 'sia' | 'pm' | 'v' | 'nh' | 'lr'
 
 /** Beat-level alphaTex property tags. `su`/`sd` mark the pick-stroke direction
@@ -37,6 +38,22 @@ export const BEND_LABELS: Record<number, string> = {
   6: '1 1/2',
   8: '2x',
 }
+
+/** General MIDI program numbers for the playback timbres offered in the UI.
+ * Same soundfont either way — this only changes which instrument patch (and
+ * therefore articulation/tone) alphaTab's synth plays the notes with. */
+export const SOUND_OPTIONS = [
+  { program: 25, label: 'Violão de aço' },
+  { program: 24, label: 'Violão de nylon' },
+  { program: 27, label: 'Guitarra limpa' },
+  { program: 28, label: 'Guitarra abafada' },
+  { program: 29, label: 'Guitarra overdrive' },
+  { program: 30, label: 'Guitarra distorcida' },
+  { program: 33, label: 'Baixo (dedo)' },
+  { program: 34, label: 'Baixo (palheta)' },
+] as const
+
+export const DEFAULT_SOUND = 25
 
 export interface Cell {
   fret: number
@@ -87,8 +104,15 @@ function tuningToAlphaTex(tuningLowToHigh: string[]): string {
 
 /** `p` (pull-off) has no dedicated alphaTex tag — alphaTab derives hammer-on vs.
  * pull-off display from the pitch difference between notes, so both compile to `h`. */
+/** `lr` (let ring) compiles to a tie (`t`) rather than alphaTex's own `lr` tag:
+ * `lr` draws as a "Let Ring" label plus a dashed line above the staff, but a
+ * tie draws as a plain slur — visually identical to a hammer-on/pull-off arc,
+ * just without the H/P letter — which reads much more clearly as "this note
+ * keeps ringing into the next one" in a guitar tab. */
 function effectToTex(effect: NoteEffect): string {
-  return effect === 'p' ? 'h' : effect
+  if (effect === 'p') return 'h'
+  if (effect === 'lr') return 't'
+  return effect
 }
 
 /** alphaTex requires the bend effect to carry explicit bend points; a bare
@@ -125,12 +149,14 @@ export function gridToAlphaTex(
   instrument: InstrumentConfig,
   grid: TabGrid,
   bpm = 120,
+  sound = DEFAULT_SOUND,
 ): string {
   const tuning = tuningToAlphaTex(instrument.tuning)
   const header = [
     `\\title "${escapeTexString(tabName)}"`,
     `\\tempo ${bpm}`,
     `\\track "${escapeTexString(tabName)}"`,
+    `\\instrument ${sound}`,
     '\\staff{tabs}',
     `\\tuning (${tuning})`,
   ].join('\n')

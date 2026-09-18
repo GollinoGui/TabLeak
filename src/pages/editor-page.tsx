@@ -11,6 +11,7 @@ import { Input } from '@/components/ui/input'
 import { useAlphaTab } from '@/hooks/use-alpha-tab'
 import {
   BEND_STEPS,
+  DEFAULT_SOUND,
   type BeatEffect,
   type BendData,
   type BendKind,
@@ -45,7 +46,8 @@ function getInitialLayoutMode(): LayoutMode {
 
 export function EditorPage() {
   const { tabId } = useParams<{ tabId: string }>()
-  const { getTab, updateTabContent, updateTabBpm, renameTab, maxBarsPerTab } = useLibrary()
+  const { getTab, updateTabContent, updateTabBpm, updateTabSound, renameTab, maxBarsPerTab } =
+    useLibrary()
   const tab = tabId ? getTab(tabId) : undefined
 
   const containerRef = React.useRef<HTMLDivElement>(null)
@@ -62,6 +64,7 @@ export function EditorPage() {
 
   const [grid, setGrid] = React.useState<TabGrid>(() => deserializeGrid(tab?.content ?? null))
   const [bpm, setBpm] = React.useState(tab?.bpm ?? 120)
+  const [sound, setSound] = React.useState(tab?.sound ?? DEFAULT_SOUND)
   const [cursor, setCursor] = React.useState({ col: 0, string: 1 })
   const [digitBuffer, setDigitBuffer] = React.useState('')
   const [noteNameMode, setNoteNameMode] = React.useState(false)
@@ -82,8 +85,8 @@ export function EditorPage() {
   // Regenerate the AlphaTab render whenever the underlying grid or tempo changes.
   React.useEffect(() => {
     if (!tab) return
-    setTex(gridToAlphaTex(tab.name, tab.instrumentConfig, grid, bpm))
-  }, [grid, bpm, tab, setTex])
+    setTex(gridToAlphaTex(tab.name, tab.instrumentConfig, grid, bpm, sound))
+  }, [grid, bpm, sound, tab, setTex])
 
   // Keep the notation preview scrolled to where the cursor currently is —
   // reapplied by the hook after every render too, so editing far into the
@@ -99,12 +102,13 @@ export function EditorPage() {
     autosaveTimeoutRef.current = setTimeout(() => {
       updateTabContent(tab.id, serializeGrid(grid))
       if (bpm !== tab.bpm) updateTabBpm(tab.id, bpm)
+      if (sound !== (tab.sound ?? DEFAULT_SOUND)) updateTabSound(tab.id, sound)
     }, AUTOSAVE_MS)
     return () => {
       if (autosaveTimeoutRef.current) clearTimeout(autosaveTimeoutRef.current)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [grid, bpm, tab?.id])
+  }, [grid, bpm, sound, tab?.id])
 
   React.useEffect(() => {
     return () => {
@@ -190,10 +194,11 @@ export function EditorPage() {
     if (autosaveTimeoutRef.current) clearTimeout(autosaveTimeoutRef.current)
     updateTabContent(tab.id, serializeGrid(grid))
     if (bpm !== tab.bpm) updateTabBpm(tab.id, bpm)
+    if (sound !== (tab.sound ?? DEFAULT_SOUND)) updateTabSound(tab.id, sound)
     setJustSaved(true)
     if (savedFeedbackTimeoutRef.current) clearTimeout(savedFeedbackTimeoutRef.current)
     savedFeedbackTimeoutRef.current = setTimeout(() => setJustSaved(false), SAVED_FEEDBACK_MS)
-  }, [tab, grid, bpm, commitDigitBuffer, updateTabContent, updateTabBpm])
+  }, [tab, grid, bpm, sound, commitDigitBuffer, updateTabContent, updateTabBpm, updateTabSound])
 
   const handleToggleLayoutMode = React.useCallback(() => {
     setLayoutModeState((mode) => {
@@ -524,6 +529,8 @@ export function EditorPage() {
         maxBpm={MAX_BPM}
         layoutMode={layoutMode}
         onToggleLayoutMode={handleToggleLayoutMode}
+        sound={sound}
+        onSoundChange={setSound}
       />
     </div>
   )

@@ -1,6 +1,7 @@
 import * as React from 'react'
 
 import { PLANS } from '@/lib/plans'
+import { DEFAULT_SOUND } from '@/lib/tab-grid'
 import type { Folder, InstrumentConfig, Tab, UserProfile } from '@/types'
 
 const STORAGE_KEY = 'tableak.library.v1'
@@ -65,6 +66,7 @@ interface LibraryContextValue {
   restoreTab: (id: string) => void
   updateTabContent: (id: string, content: string) => void
   updateTabBpm: (id: string, bpm: number) => void
+  updateTabSound: (id: string, sound: number) => void
   renameTab: (id: string, name: string) => void
   getTab: (id: string) => Tab | undefined
 }
@@ -139,6 +141,7 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
         instrumentConfig: input.instrumentConfig,
         content: null,
         bpm: 120,
+        sound: DEFAULT_SOUND,
         isDeleted: false,
         deletedAt: null,
         createdAt: now,
@@ -184,6 +187,15 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
     }))
   }, [])
 
+  const updateTabSound = React.useCallback((id: string, sound: number) => {
+    setState((s) => ({
+      ...s,
+      tabs: s.tabs.map((t) =>
+        t.id === id ? { ...t, sound, updatedAt: new Date().toISOString() } : t,
+      ),
+    }))
+  }, [])
+
   const renameTab = React.useCallback((id: string, name: string) => {
     setState((s) => ({
       ...s,
@@ -218,6 +230,7 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
     restoreTab,
     updateTabContent,
     updateTabBpm,
+    updateTabSound,
     renameTab,
     getTab,
   }

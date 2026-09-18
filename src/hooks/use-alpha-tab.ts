@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { AlphaTabApi, LayoutMode, NotationElement } from '@coderline/alphatab'
+import { AlphaTabApi, LayoutMode, NotationElement, ScrollMode } from '@coderline/alphatab'
 
 interface Rect {
   x: number
@@ -28,10 +28,14 @@ function scrollRectIntoView(container: HTMLElement, rect: Rect) {
   }
 
   if (left === undefined && top === undefined) return
+  // Instant, not smooth: this runs after every edit (sometimes several times
+  // in quick succession while alphaTab settles a re-layout), and overlapping
+  // smooth-scroll animations fighting each other is what made the view
+  // visibly snap back to the start of the tab instead of following the cursor.
   container.scrollTo({
     left: left ?? container.scrollLeft,
     top: top ?? container.scrollTop,
-    behavior: 'smooth',
+    behavior: 'instant',
   })
 }
 
@@ -88,6 +92,14 @@ export function useAlphaTab(
         // on every render (e.g. each note typed), not just during playback.
         // Contain it to this container instead.
         scrollElement: el,
+        // Off by default: alphaTab's own cursor auto-scroll re-fires on every
+        // re-render (i.e. every edit) and targets the *playback* cursor, which
+        // sits at the very start of the piece until Play is pressed — so with
+        // this left on, editing anywhere past bar 1 snapped the view back to
+        // the beginning after each keystroke. Our own applyScroll below
+        // follows the *edit* cursor instead; re-enabled only while playing,
+        // so the view still tracks the playback cursor during playback.
+        scrollMode: ScrollMode.Off,
       },
     })
     apiRef.current = api
@@ -105,7 +117,14 @@ export function useAlphaTab(
     }
     applyScrollRef.current = applyScroll
 
-    const onPlayerStateChanged = (e: { state: number }) => setIsPlaying(e.state === 1)
+    const onPlayerStateChanged = (e: { state: number }) => {
+      const playing = e.state === 1
+      setIsPlaying(playing)
+      // Hand scrolling over to alphaTab's own playback-cursor tracking only
+      // while actually playing; back to our edit-cursor tracking otherwise.
+      api.settings.player.scrollMode = playing ? ScrollMode.Continuous : ScrollMode.Off
+      api.updateSettings()
+    }
     api.playerStateChanged.on(onPlayerStateChanged)
 
     // AlphaTab itself force-scrolls to the playback position on every render,

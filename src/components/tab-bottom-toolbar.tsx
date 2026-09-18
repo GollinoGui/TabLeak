@@ -6,6 +6,7 @@ import {
   Guitar,
   HelpCircle,
   Minus,
+  Music,
   Pause,
   Play,
   Plus,
@@ -18,6 +19,8 @@ import {
 import { ShortcutsPanel } from '@/components/shortcuts-panel'
 import { ThemeToggle } from '@/components/theme-toggle'
 import { Button } from '@/components/ui/button'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { SOUND_OPTIONS } from '@/lib/tab-grid'
 import { cn } from '@/lib/utils'
 
 interface TabBottomToolbarProps {
@@ -37,6 +40,8 @@ interface TabBottomToolbarProps {
   maxBpm: number
   layoutMode: LayoutMode
   onToggleLayoutMode: () => void
+  sound: number
+  onSoundChange: (sound: number) => void
 }
 
 export function TabBottomToolbar({
@@ -56,6 +61,8 @@ export function TabBottomToolbar({
   maxBpm,
   layoutMode,
   onToggleLayoutMode,
+  sound,
+  onSoundChange,
 }: TabBottomToolbarProps) {
   const isHorizontal = layoutMode === LayoutMode.Horizontal
   return (
@@ -139,6 +146,27 @@ export function TabBottomToolbar({
         >
           {isHorizontal ? <StretchHorizontal /> : <WrapText />}
         </Button>
+
+        <Select value={String(sound)} onValueChange={(v) => onSoundChange(Number(v))}>
+          <SelectTrigger
+            className="h-9 w-9 justify-center rounded-full border-none p-0 shadow-none [&>svg:last-child]:hidden"
+            aria-label="Som da reprodução"
+            title="Som da reprodução"
+          >
+            <Music className="size-4" />
+            {/* SelectValue ignores className (Radix quirk) — wrap it instead. */}
+            <span className="sr-only">
+              <SelectValue />
+            </span>
+          </SelectTrigger>
+          <SelectContent align="center">
+            {SOUND_OPTIONS.map((opt) => (
+              <SelectItem key={opt.program} value={String(opt.program)}>
+                {opt.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
 
         <span className="mx-1 h-6 w-px bg-border" />
 
